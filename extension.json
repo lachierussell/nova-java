@@ -1,0 +1,297 @@
+{
+  "identifier": "com.parkcedar.java",
+  "name": "Java",
+  "organization": "Parkcedar",
+  "description": "Complete Java development support with Eclipse JDT.LS, tree-sitter syntax highlighting, intelligent code completion, navigation, refactoring, and real-time diagnostics.",
+  "version": "1.0.2",
+  "categories": [
+    "commands",
+    "languages",
+    "formatters",
+    "completions",
+    "issues",
+    "sidebars"
+  ],
+  "license": "MIT",
+  "min_runtime": "10.0",
+  "bugs": "https://www.parkcedar.com",
+  "main": "main.js",
+
+  "entitlements": {
+    "process": true,
+    "filesystem": "readwrite",
+    "requests": true
+  },
+
+  "commands": {
+    "editor": [
+      {
+        "title": "Jump To Definition",
+        "command": "java.jumpToDefinition",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      {
+        "title": "Jump To Type Definition",
+        "command": "java.jumpToTypeDefinition",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      {
+        "title": "Jump To Implementation",
+        "command": "java.jumpToImplementation",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      { "separator": true },
+      {
+        "title": "Find References",
+        "command": "java.findReferences",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      {
+        "title": "Find Symbol",
+        "command": "java.findSymbols",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      { "separator": true },
+      {
+        "title": "Format File",
+        "command": "java.formatFile",
+        "shortcut": "opt-shift-f",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      {
+        "title": "Rename Symbol",
+        "command": "java.renameSymbol",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      { "separator": true },
+      {
+        "title": "Organize Imports",
+        "command": "java.organizeImports",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      { "separator": true },
+      {
+        "title": "Preferences",
+        "command": "java.preferences",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      {
+        "title": "Extension Preferences",
+        "command": "java.extensionPreferences",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      }
+    ],
+    "extensions": [
+      {
+        "title": "Extension Preferences",
+        "command": "java.extensionPreferences"
+      },
+      {
+        "title": "Restart Language Server",
+        "command": "java.restartServer",
+        "filters": { "syntaxes": ["java"] }
+      }
+    ]
+  },
+
+  "config": [
+    {
+      "title": "Language Server",
+      "type": "section",
+      "children": [
+        {
+          "key": "java.lsp.flavor",
+          "title": "Language server to use",
+          "description": "Which language server to use",
+          "type": "enum",
+          "values": [
+            ["auto", "Automatic (Eclipse JDT.LS)"],
+            ["custom", "Custom server"],
+            ["none", "None"]
+          ],
+          "radio": false,
+          "default": "auto"
+        },
+        {
+          "key": "java.lsp.path",
+          "title": "Language server Path",
+          "description": "Path to a custom language server executable or JAR",
+          "type": "path",
+          "placeholder": "/usr/local/bin/jdtls"
+        },
+        {
+          "key": "java.jdk.home",
+          "title": "Java JDK Home",
+          "type": "path",
+          "description": "Path to the JDK installation (will search JAVA_HOME and common locations if blank)",
+          "placeholder": "/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home"
+        }
+      ]
+    },
+    {
+      "title": "Formatting",
+      "type": "section",
+      "children": [
+        {
+          "key": "java.format.onSave",
+          "title": "Format on save",
+          "description": "Format Java files automatically when saving.",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "key": "java.format.formatter",
+          "title": "Formatter",
+          "description": "Choose which formatter to use",
+          "type": "enum",
+          "values": [
+            ["lsp", "Language Server (Eclipse JDT)"],
+            ["spotless", "Gradle Spotless (Palantir)"]
+          ],
+          "default": "lsp"
+        },
+        {
+          "key": "java.format.style",
+          "title": "Formatting style",
+          "description": "Code formatting style preset (for LSP formatter only)",
+          "type": "enum",
+          "values": [
+            ["google", "Google Java Style"],
+            ["aosp", "Android Open Source Project"],
+            ["eclipse", "Eclipse"],
+            ["palantir", "Palantir Java Format"],
+            ["custom", "Custom"]
+          ],
+          "default": "google"
+        }
+      ]
+    },
+    {
+      "title": "Linting",
+      "type": "section",
+      "children": [
+        {
+          "key": "java.lint.enabled",
+          "title": "Enable linting",
+          "description": "Enable diagnostic linting via language server",
+          "type": "boolean",
+          "default": true
+        }
+      ]
+    }
+  ],
+
+  "configWorkspace": [
+    {
+      "key": "java.jdk.home",
+      "title": "Java JDK Home",
+      "type": "path",
+      "description": "Path to the JDK installation (will search JAVA_HOME and common locations if blank)",
+      "placeholder": "Global Default"
+    },
+    {
+      "key": "java.format.onSave",
+      "title": "Format on save",
+      "description": "Format Java files automatically when saving.",
+      "type": "enum",
+      "values": [
+        [null, "Inherit from Global Settings"],
+        [false, "Disable"],
+        [true, "Enable"]
+      ],
+      "default": null
+    },
+    {
+      "key": "java.format.formatter",
+      "title": "Formatter",
+      "description": "Choose which formatter to use",
+      "type": "enum",
+      "values": [
+        [null, "Inherit from Global Settings"],
+        ["lsp", "Language Server (Eclipse JDT)"],
+        ["spotless", "Gradle Spotless (Palantir)"]
+      ],
+      "default": null
+    },
+    {
+      "key": "java.project.sourcePaths",
+      "title": "Source Paths",
+      "description": "Additional source paths for the project",
+      "type": "stringArray"
+    },
+    {
+      "key": "java.project.outputPath",
+      "title": "Output Path",
+      "description": "Compiled class output directory",
+      "type": "string",
+      "placeholder": "bin"
+    },
+    {
+      "key": "java.project.referencedLibraries",
+      "title": "Referenced Libraries",
+      "description": "JAR files or directories to include in classpath",
+      "type": "stringArray"
+    }
+  ],
+
+  "sidebars": [
+    {
+      "id": "java.sidebar",
+      "name": "Java",
+      "smallImage": "java",
+      "largeImage": "java",
+      "sections": [
+        {
+          "id": "java.sidebar.references",
+          "name": "References",
+          "placeholderText": "Results from \"Find References\" appear here.",
+          "placeholderImage": "java",
+          "headerCommands": [
+            {
+              "title": "Find References",
+              "command": "java.findReferences",
+              "tooltip": "Find references to the selected symbol"
+            }
+          ]
+        },
+        {
+          "id": "java.sidebar.symbols",
+          "name": "Symbols",
+          "placeholderText": "Results from \"Find Symbols\" appear here.",
+          "placeholderImage": "java",
+          "headerCommands": [
+            {
+              "title": "Find Symbol",
+              "command": "java.findSymbols",
+              "tooltip": "Open the Find Symbol dialog"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+
+  "activationEvents": [
+    "onLanguage:java"
+  ]
+}

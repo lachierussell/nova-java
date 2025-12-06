@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Nova
+*.novaworkspace
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+test*.java
+*_test.java
+
+# Tree-sitter source (keep only binary)
+tree-sitter-java/
+
+# Build artifacts
+*.dylib.dSYM/
