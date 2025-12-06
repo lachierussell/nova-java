@@ -14,9 +14,9 @@
   ],
   "license": "MIT",
   "min_runtime": "10.0",
-  "bugs": "https://www.parkcedar.com",
+  "bugs": "https://github.com/lachierussell/nova-java/issues",
+  "repository": "https://github.com/lachierussell/nova-java",
   "main": "main.js",
-
   "entitlements": {
     "process": true,
     "filesystem": "readwrite",

@@ -21,7 +21,7 @@ A comprehensive Java development extension for Nova editor, providing rich langu
 - **Code Folding** - Fold classes, methods, blocks, and comments
 - **Symbol Outline** - Navigate your code structure
 
-![](Images/Screenshot 2025-12-06 at 12.46.00.png)
+![](https://raw.githubusercontent.com/lachierussell/nova-java/8049c463ad5f1614b91dbbbabbe77a8af1f7c1cf/Images/Screenshot%202025-12-06%20at%2012.46.00.png?token=GHSAT0AAAAAADQGA6TK7WN5EFNONY4BG7XI2JTRW7Q)
 
 ### Java Development Kit (JDK)
 You need JDK 21 or later installed on your system.
