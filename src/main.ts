@@ -110,10 +110,17 @@ function registerSaveListeners(): void {
         // we return, and a rejection surfaces as "the file couldn't be saved".
         // Formatting is best-effort, so swallow errors and just log them.
         try {
+          let organized = false;
           if (getOverridableBoolean(config.organizeImportsOnSave)) {
             await lsp.organizeImports(client, ed);
+            organized = true;
           }
           if (getOverridableBoolean(config.formatOnSave)) {
+            // Give Nova a moment to push the organize-imports change to the
+            // server. Formatting is computed server-side against the document
+            // it last saw, so asking too soon returns edits whose positions
+            // describe the pre-organize text.
+            if (organized) await settle();
             await formatDocument(client, ed);
           }
         } catch (err) {
@@ -123,6 +130,11 @@ function registerSaveListeners(): void {
       disposables.add(willSave);
     }),
   );
+}
+
+/** Yield long enough for pending document changes to reach the server. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 150));
 }
 
 // ---------------------------------------------------------------------------

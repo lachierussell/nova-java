@@ -171,11 +171,34 @@ export async function formatDocumentLsp(
   client: LanguageClient,
   editor: TextEditor,
 ): Promise<void> {
+  // Snapshot before the round-trip. On save we may have just applied an
+  // organize-imports edit, and the server can answer from the text it had
+  // before that change arrived — its positions would then refer to a document
+  // that no longer exists, which is how formatting used to scramble files.
+  const before = documentText(editor.document);
   const edits = (await client.sendRequest("textDocument/formatting", {
     textDocument: { uri: editor.document.uri },
     options: formattingOptions(editor),
   })) as LspTextEdit[] | null;
-  if (edits && edits.length > 0) await applyTextEdits(editor, edits);
+  if (!edits || edits.length === 0) return;
+  if (!documentUnchanged(editor, before, "formatting")) return;
+  await applyTextEdits(editor, edits);
+}
+
+/**
+ * Did the document change while we were waiting on the server? If so its edits
+ * describe stale text and must be dropped rather than applied blindly.
+ */
+function documentUnchanged(
+  editor: TextEditor,
+  before: string,
+  what: string,
+): boolean {
+  if (documentText(editor.document) === before) return true;
+  console.warn(
+    `Discarding ${what} edits: the document changed while the language server was responding.`,
+  );
+  return false;
 }
 
 /** Format just the selection (falls back to the whole document). */
@@ -197,7 +220,9 @@ export async function formatSelection(
     },
     options: formattingOptions(editor),
   })) as LspTextEdit[] | null;
-  if (edits && edits.length > 0) await applyTextEdits(editor, edits);
+  if (!edits || edits.length === 0) return;
+  if (!documentUnchanged(editor, text, "range formatting")) return;
+  await applyTextEdits(editor, edits);
 }
 
 interface CodeAction {

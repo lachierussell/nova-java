@@ -48,11 +48,53 @@ export function offsetToLspPosition(text: string, offset: number): LspPosition {
   return { line: lo, character: offset - starts[lo] };
 }
 
-/** Convert an LSP {line, character} into a flat character offset. */
+/**
+ * Convert an LSP {line, character} into a flat character offset.
+ *
+ * `character` is clamped to the end of its line, as the LSP spec requires. A
+ * `line` past the end of the document is *not* clamped: the resulting
+ * out-of-range offset is how callers detect that the server is describing a
+ * different revision of the file than the one we hold.
+ */
 export function lspPositionToOffset(text: string, pos: LspPosition): number {
+  return positionToOffset(text, lineStartOffsets(text), pos);
+}
+
+function positionToOffset(
+  text: string,
+  starts: number[],
+  pos: LspPosition,
+): number {
+  if (pos.line >= starts.length) {
+    // Beyond the last line; deliberately out of range.
+    return text.length + 1;
+  }
+  const lineStart = starts[Math.max(0, pos.line)] ?? 0;
+  const lineEnd = pos.line + 1 < starts.length
+    ? starts[pos.line + 1] - newlineWidth(text, starts[pos.line + 1])
+    : text.length;
+  return Math.min(lineStart + Math.max(0, pos.character), lineEnd);
+}
+
+/** 2 for a CRLF ending at `nextLineStart`, otherwise 1. */
+function newlineWidth(text: string, nextLineStart: number): number {
+  return text[nextLineStart - 2] === "\r" ? 2 : 1;
+}
+
+/**
+ * Convert an LSP range into flat start/end offsets using a single pass over
+ * the text. Callers formatting a whole document resolve hundreds of edits, and
+ * every one of them must be measured against the same snapshot.
+ */
+export function lspRangeToOffsets(
+  text: string,
+  range: LspRange,
+): { start: number; end: number } {
   const starts = lineStartOffsets(text);
-  const lineStart = starts[Math.min(pos.line, starts.length - 1)] ?? 0;
-  return lineStart + pos.character;
+  return {
+    start: positionToOffset(text, starts, range.start),
+    end: positionToOffset(text, starts, range.end),
+  };
 }
 
 /** Read a document's full text. */
@@ -69,11 +111,8 @@ export function rangeToLspRange(document: TextDocument, range: Range): LspRange 
 }
 
 export function lspRangeToRange(document: TextDocument, range: LspRange): Range {
-  const text = documentText(document);
-  return new Range(
-    lspPositionToOffset(text, range.start),
-    lspPositionToOffset(text, range.end),
-  );
+  const { start, end } = lspRangeToOffsets(documentText(document), range);
+  return new Range(start, end);
 }
 
 /** LSP file URI for a Nova path. */

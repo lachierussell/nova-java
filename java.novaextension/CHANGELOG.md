@@ -1,4 +1,12 @@
 v 1.1.2
+- Fixed format on save corrupting files by scattering spaces through the text
+  (#1). Edit positions are now resolved against a single snapshot of the
+  document, edits that overlap or fall outside it are rejected instead of
+  applied, and formatting results are discarded if the document changed while
+  the server was responding
+- Format on save now waits for the organize-imports change to reach the server
+  before requesting formatting
+- Added a unit test suite (`npm test`)
 - Fixed restarts failing with "already running" after the language server
   exited: each launch now uses a fresh client identifier and the previous
   client is always stopped
