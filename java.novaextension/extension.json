@@ -3,7 +3,7 @@
   "name": "Java",
   "organization": "Parkcedar",
   "description": "Complete Java development support with Eclipse JDT.LS, tree-sitter syntax highlighting, intelligent code completion, navigation, refactoring, and real-time diagnostics.",
-  "version": "1.0.2",
+  "version": "1.1.2",
   "categories": [
     "commands",
     "languages",
@@ -16,7 +16,7 @@
   "min_runtime": "10.0",
   "bugs": "https://github.com/lachierussell/nova-java/issues",
   "repository": "https://github.com/lachierussell/nova-java",
-  "main": "main.js",
+  "main": "main.dist.js",
   "entitlements": {
     "process": true,
     "filesystem": "readwrite",
@@ -63,9 +63,9 @@
       },
       { "separator": true },
       {
-        "title": "Format File",
-        "command": "java.formatFile",
-        "shortcut": "opt-shift-f",
+        "title": "Code Actions…",
+        "command": "java.codeActions",
+        "shortcut": "opt-enter",
         "filters": {
           "syntaxes": ["java"]
         }
@@ -78,6 +78,21 @@
         }
       },
       { "separator": true },
+      {
+        "title": "Format File",
+        "command": "java.formatFile",
+        "shortcut": "opt-shift-f",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
+      {
+        "title": "Format Selection",
+        "command": "java.formatSelection",
+        "filters": {
+          "syntaxes": ["java"]
+        }
+      },
       {
         "title": "Organize Imports",
         "command": "java.organizeImports",
@@ -149,6 +164,28 @@
       ]
     },
     {
+      "title": "Project",
+      "type": "section",
+      "children": [
+        {
+          "key": "java.project.root",
+          "title": "Project Root",
+          "description": "Directory the language server treats as the project root. Absolute, or relative to the workspace. Leave blank to use the workspace folder.",
+          "type": "path",
+          "allowFiles": false,
+          "allowFolders": true,
+          "placeholder": "Workspace folder"
+        },
+        {
+          "key": "java.gradle.wrapperPath",
+          "title": "Gradle Wrapper Path",
+          "description": "Path to gradlew (or the folder containing it). Leave blank to search upwards from the project root.",
+          "type": "path",
+          "placeholder": "Search upwards from the project root"
+        }
+      ]
+    },
+    {
       "title": "Formatting",
       "type": "section",
       "children": [
@@ -156,6 +193,13 @@
           "key": "java.format.onSave",
           "title": "Format on save",
           "description": "Format Java files automatically when saving.",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "key": "java.format.organizeImportsOnSave",
+          "title": "Organize imports on save",
+          "description": "Remove unused imports and reorder them when saving.",
           "type": "boolean",
           "default": false
         },
@@ -183,6 +227,24 @@
             ["custom", "Custom"]
           ],
           "default": "google"
+        }
+      ]
+    },
+    {
+      "title": "Inlay Hints",
+      "type": "section",
+      "children": [
+        {
+          "key": "java.inlayHints.parameterNames",
+          "title": "Parameter name hints",
+          "description": "Show inline parameter names at call sites.",
+          "type": "enum",
+          "values": [
+            ["none", "None"],
+            ["literals", "Literals only"],
+            ["all", "All"]
+          ],
+          "default": "none"
         }
       ]
     },
@@ -222,6 +284,18 @@
       "default": null
     },
     {
+      "key": "java.format.organizeImportsOnSave",
+      "title": "Organize imports on save",
+      "description": "Remove unused imports and reorder them when saving.",
+      "type": "enum",
+      "values": [
+        [null, "Inherit from Global Settings"],
+        [false, "Disable"],
+        [true, "Enable"]
+      ],
+      "default": null
+    },
+    {
       "key": "java.format.formatter",
       "title": "Formatter",
       "description": "Choose which formatter to use",
@@ -232,6 +306,22 @@
         ["spotless", "Gradle Spotless (Palantir)"]
       ],
       "default": null
+    },
+    {
+      "key": "java.project.root",
+      "title": "Project Root",
+      "description": "Directory the language server treats as the project root. Absolute, or relative to the workspace. Leave blank to use the workspace folder.",
+      "type": "path",
+      "allowFiles": false,
+      "allowFolders": true,
+      "placeholder": "Workspace folder"
+    },
+    {
+      "key": "java.gradle.wrapperPath",
+      "title": "Gradle Wrapper Path",
+      "description": "Path to gradlew (or the folder containing it). Leave blank to search upwards from the project root.",
+      "type": "path",
+      "placeholder": "Search upwards from the project root"
     },
     {
       "key": "java.project.sourcePaths",
@@ -261,6 +351,19 @@
       "smallImage": "java",
       "largeImage": "java",
       "sections": [
+        {
+          "id": "java.sidebar.info",
+          "name": "Language Server",
+          "placeholderText": "Java language server status.",
+          "headerCommands": [
+            {
+              "title": "Restart Language Server",
+              "command": "java.restartServer",
+              "image": "__builtin.refresh",
+              "tooltip": "Restart the Java language server"
+            }
+          ]
+        },
         {
           "id": "java.sidebar.references",
           "name": "References",

@@ -20,3 +20,10 @@ tree-sitter-java/
 
 # Build artifacts
 *.dylib.dSYM/
+
+# TypeScript / Vite build
+node_modules/
+java.novaextension/Scripts/main.dist.js
+
+# Test workspace build output
+test-workspace/target/

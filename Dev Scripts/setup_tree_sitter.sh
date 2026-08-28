@@ -7,7 +7,7 @@ set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 TREE_SITTER_DIR="$SCRIPT_DIR/tree-sitter-java"
-OUTPUT_DIR="$SCRIPT_DIR/Syntaxes"
+OUTPUT_DIR="$SCRIPT_DIR/../java.novaextension/Syntaxes"
 
 echo "🌳 Setting up tree-sitter Java grammar..."
 

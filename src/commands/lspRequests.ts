@@ -1,0 +1,299 @@
+import {
+  LspLocation,
+  LspRange,
+  LspTextEdit,
+  documentText,
+  offsetToLspPosition,
+} from "../lspNovaConversions";
+import {
+  applyTextEdits,
+  applyWorkspaceEdit,
+  WorkspaceEdit,
+} from "../applyEdits";
+import { revealLocation } from "../reveal";
+import { notify } from "../notify";
+import { promptInput } from "../novaUtils";
+import { ReferencesView } from "../sidebar/referencesView";
+import { SymbolInformation, SymbolsView } from "../sidebar/symbolsView";
+
+/** Build the `{ textDocument, position }` params for the editor's cursor. */
+function positionParams(editor: TextEditor): {
+  textDocument: { uri: string };
+  position: { line: number; character: number };
+} {
+  const doc = editor.document;
+  const text = documentText(doc);
+  return {
+    textDocument: { uri: doc.uri },
+    position: offsetToLspPosition(text, editor.selectedRange.start),
+  };
+}
+
+function asLocationArray(result: unknown): LspLocation[] {
+  if (!result) return [];
+  const list = Array.isArray(result) ? result : [result];
+  return list.map((r) => {
+    // Normalise LocationLink into Location.
+    if (r && typeof r === "object" && "targetUri" in r) {
+      const link = r as {
+        targetUri: string;
+        targetSelectionRange: LspRange;
+        targetRange: LspRange;
+      };
+      return {
+        uri: link.targetUri,
+        range: link.targetSelectionRange ?? link.targetRange,
+      };
+    }
+    return r as LspLocation;
+  });
+}
+
+/** Shared implementation for the definition-like "jump to a location" requests. */
+async function goToLocation(
+  client: LanguageClient,
+  editor: TextEditor,
+  method: string,
+  label: string,
+): Promise<void> {
+  const result = await client.sendRequest(method, positionParams(editor));
+  const locations = asLocationArray(result);
+  if (locations.length === 0) {
+    notify.info(`No ${label.toLowerCase()} found.`);
+    return;
+  }
+  if (locations.length === 1) {
+    await revealLocation(locations[0]);
+    return;
+  }
+  await pickLocation(locations, label);
+}
+
+export function goToDefinition(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  return goToLocation(client, editor, "textDocument/definition", "Definition");
+}
+
+export function goToTypeDefinition(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  return goToLocation(
+    client,
+    editor,
+    "textDocument/typeDefinition",
+    "Type Definition",
+  );
+}
+
+export function goToImplementation(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  return goToLocation(
+    client,
+    editor,
+    "textDocument/implementation",
+    "Implementation",
+  );
+}
+
+async function pickLocation(
+  locations: LspLocation[],
+  placeholder: string,
+): Promise<void> {
+  const labels = locations.map((loc) => {
+    const path = decodeURIComponent(loc.uri.replace(/^file:\/\//, ""));
+    return `${nova.path.basename(path)}:${loc.range.start.line + 1}`;
+  });
+  return new Promise((resolve) => {
+    nova.workspace.showChoicePalette(labels, { placeholder }, (_sel, index) => {
+      if (index != null && index >= 0) {
+        void revealLocation(locations[index]).then(resolve);
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+export async function findReferences(
+  client: LanguageClient,
+  editor: TextEditor,
+  view: ReferencesView,
+): Promise<void> {
+  const params = {
+    ...positionParams(editor),
+    context: { includeDeclaration: true },
+  };
+  const result = (await client.sendRequest(
+    "textDocument/references",
+    params,
+  )) as LspLocation[] | null;
+  const locations = result ?? [];
+  if (locations.length === 0) {
+    notify.info("No references found.");
+    return;
+  }
+  view.show(locations);
+}
+
+export async function rename(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  const newName = await promptInput("Rename symbol to:", {
+    label: "Rename Symbol",
+  });
+  if (newName == null || newName.length === 0) return;
+  const params = { ...positionParams(editor), newName };
+  const edit = (await client.sendRequest(
+    "textDocument/rename",
+    params,
+  )) as WorkspaceEdit | null;
+  if (!edit) {
+    notify.info("Symbol cannot be renamed here.");
+    return;
+  }
+  await applyWorkspaceEdit(edit);
+}
+
+function formattingOptions(editor: TextEditor): {
+  tabSize: number;
+  insertSpaces: boolean;
+} {
+  return { tabSize: editor.tabLength, insertSpaces: editor.softTabs };
+}
+
+export async function formatDocumentLsp(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  const edits = (await client.sendRequest("textDocument/formatting", {
+    textDocument: { uri: editor.document.uri },
+    options: formattingOptions(editor),
+  })) as LspTextEdit[] | null;
+  if (edits && edits.length > 0) await applyTextEdits(editor, edits);
+}
+
+/** Format just the selection (falls back to the whole document). */
+export async function formatSelection(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  const selection = editor.selectedRange;
+  if (selection.length === 0) {
+    await formatDocumentLsp(client, editor);
+    return;
+  }
+  const text = documentText(editor.document);
+  const edits = (await client.sendRequest("textDocument/rangeFormatting", {
+    textDocument: { uri: editor.document.uri },
+    range: {
+      start: offsetToLspPosition(text, selection.start),
+      end: offsetToLspPosition(text, selection.end),
+    },
+    options: formattingOptions(editor),
+  })) as LspTextEdit[] | null;
+  if (edits && edits.length > 0) await applyTextEdits(editor, edits);
+}
+
+interface CodeAction {
+  title: string;
+  kind?: string;
+  edit?: WorkspaceEdit;
+  command?: { command: string; arguments?: unknown[]; title: string };
+}
+
+const ORGANIZE_KIND = "source.organizeImports";
+
+export async function organizeImports(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  const actions = (await client.sendRequest("textDocument/codeAction", {
+    textDocument: { uri: editor.document.uri },
+    range: {
+      start: { line: 0, character: 0 },
+      end: { line: 0, character: 0 },
+    },
+    context: { diagnostics: [], only: [ORGANIZE_KIND] },
+  })) as CodeAction[] | null;
+
+  const action = (actions ?? []).find(
+    (a) => a.kind?.startsWith(ORGANIZE_KIND) ?? false,
+  );
+  if (!action) {
+    notify.info("Nothing to organize.");
+    return;
+  }
+  await runCodeAction(client, action);
+}
+
+/** Present all code actions / quick-fixes at the cursor as a palette. */
+export async function codeActions(
+  client: LanguageClient,
+  editor: TextEditor,
+): Promise<void> {
+  const text = documentText(editor.document);
+  const start = offsetToLspPosition(text, editor.selectedRange.start);
+  const end = offsetToLspPosition(text, editor.selectedRange.end);
+  const actions = (await client.sendRequest("textDocument/codeAction", {
+    textDocument: { uri: editor.document.uri },
+    range: { start, end },
+    context: { diagnostics: [] },
+  })) as CodeAction[] | null;
+
+  const list = (actions ?? []).filter((a) => a.title);
+  if (list.length === 0) {
+    notify.info("No code actions available here.");
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    nova.workspace.showChoicePalette(
+      list.map((a) => a.title),
+      { placeholder: "Java Code Actions" },
+      (_sel, index) => {
+        if (index != null && index >= 0) {
+          void runCodeAction(client, list[index]).then(resolve);
+        } else {
+          resolve();
+        }
+      },
+    );
+  });
+}
+
+async function runCodeAction(
+  client: LanguageClient,
+  action: CodeAction,
+): Promise<void> {
+  if (action.edit) await applyWorkspaceEdit(action.edit);
+  if (action.command) {
+    await client.sendRequest("workspace/executeCommand", {
+      command: action.command.command,
+      arguments: action.command.arguments,
+    });
+  }
+}
+
+export async function findWorkspaceSymbol(
+  client: LanguageClient,
+  view: SymbolsView,
+): Promise<void> {
+  const query = await promptInput("Enter symbol name:", {
+    label: "Find Symbol",
+  });
+  if (query == null) return;
+  const result = (await client.sendRequest("workspace/symbol", {
+    query,
+  })) as SymbolInformation[] | null;
+  const symbols = result ?? [];
+  if (symbols.length === 0) {
+    notify.info("No symbols found.");
+    return;
+  }
+  view.show(symbols);
+}
