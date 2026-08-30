@@ -101,21 +101,42 @@ export async function applyTextEdits(
   return true;
 }
 
-/** Apply a full LSP WorkspaceEdit, opening each affected document. */
-export async function applyWorkspaceEdit(edit: WorkspaceEdit): Promise<void> {
+/**
+ * Collect a WorkspaceEdit into one edit list per document URI.
+ *
+ * `documentChanges` wins over `changes` when both are present, as the spec
+ * requires.
+ */
+export function groupWorkspaceEdit(
+  edit: WorkspaceEdit,
+): Map<string, LspTextEdit[]> {
   const perUri = new Map<string, LspTextEdit[]>();
 
   if (edit.documentChanges) {
     for (const change of edit.documentChanges) {
-      perUri.set(change.textDocument.uri, change.edits);
+      // `documentChanges` also carries create/rename/delete file operations,
+      // which have no `textDocument` and no edits. Nova cannot perform those,
+      // so skip them rather than dereferencing undefined.
+      if (!change.textDocument || !change.edits) continue;
+      // A single document may appear more than once — JDT.LS splits a rename
+      // into several entries for the same file. Overwriting kept only the
+      // last, so most of a rename silently went missing.
+      const existing = perUri.get(change.textDocument.uri);
+      if (existing) existing.push(...change.edits);
+      else perUri.set(change.textDocument.uri, [...change.edits]);
     }
   } else if (edit.changes) {
     for (const [uri, edits] of Object.entries(edit.changes)) {
-      perUri.set(uri, edits);
+      perUri.set(uri, [...edits]);
     }
   }
 
-  for (const [uri, edits] of perUri) {
+  return perUri;
+}
+
+/** Apply a full LSP WorkspaceEdit, opening each affected document. */
+export async function applyWorkspaceEdit(edit: WorkspaceEdit): Promise<void> {
+  for (const [uri, edits] of groupWorkspaceEdit(edit)) {
     const editor = await nova.workspace.openFile(uri);
     if (!editor) continue;
     await applyTextEdits(editor, edits);

@@ -13,6 +13,8 @@ interface Row {
 export class InformationView implements TreeDataProvider<string> {
   private readonly tree: TreeView<string>;
   private status: ServerStatus = "stopped";
+  /** The server's own words about what it is doing, e.g. "63% Importing…". */
+  private statusDetail = "";
   private serverPath = "—";
   private javaHome = "—";
   private projectRoot = "—";
@@ -26,8 +28,9 @@ export class InformationView implements TreeDataProvider<string> {
     return this.tree;
   }
 
-  setStatus(status: ServerStatus): void {
+  setStatus(status: ServerStatus, detail?: string): void {
     this.status = status;
+    this.statusDetail = detail?.trim() ?? "";
     this.reload();
   }
 
@@ -62,8 +65,14 @@ export class InformationView implements TreeDataProvider<string> {
       running: "Running",
       failed: "Failed",
     };
+    // Importing a project takes JDT.LS anywhere from seconds to minutes, and
+    // it answers nothing until that finishes — so show its progress rather
+    // than a bare "Starting…" that looks identical to a hung server.
+    const status = this.statusDetail
+      ? `${label[this.status]} — ${this.statusDetail}`
+      : label[this.status];
     return [
-      { id: "status", label: "Status", value: label[this.status] },
+      { id: "status", label: "Status", value: status },
       { id: "jdk", label: "JDK", value: this.javaHome },
       { id: "server", label: "Language server", value: this.serverPath },
       { id: "root", label: "Project root", value: this.projectRoot },

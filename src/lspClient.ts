@@ -3,15 +3,19 @@
  */
 import { config, getConfig } from "./config";
 import {
+  MINIMUM_JAVA_MAJOR,
   findGradleWrapper,
   findJavaExecutable,
   findJavaHome,
   findJdtls,
   findJdtlsConfigPath,
   findProjectRoot,
+  findPython,
+  parseJavaMajor,
 } from "./paths";
 import { expandPath } from "./novaUtils";
 import { notify } from "./notify";
+import { setRevealClient } from "./reveal";
 import { InformationView } from "./sidebar/informationView";
 
 const FLAVOR_NONE = "none";
@@ -22,9 +26,39 @@ const HEALTHY_UPTIME_MS = 60_000;
 /** Consecutive crashes before we stop restarting and ask the user to step in. */
 const MAX_CRASH_RESTARTS = 4;
 
+/**
+ * Pause between stopping a server and starting the next one.
+ *
+ * JDT.LS holds an exclusive Eclipse lock on its `-data` directory for as long
+ * as the JVM is alive, and the JVM outlives `client.stop()`. This is only the
+ * grace period in which a healthy server may exit on its own; anything still
+ * running afterwards is killed outright by `reapOrphanedServers`, which is
+ * what actually guarantees the lock is free before the next launch.
+ */
+const RESTART_SETTLE_MS = 1000;
+
+/**
+ * Escape hatch for forcing LSP tracing on regardless of preferences, for when
+ * a settings-gated trace is itself the thing that won't switch on. Normally
+ * `java.debug.logServerTrace` governs.
+ */
+const FORCE_TRACE = false;
+
+/** Eclipse formatter profiles we can point JDT.LS at for the style presets. */
+const FORMATTER_PROFILES: Record<string, { url: string; profile: string }> = {
+  google: {
+    url: "https://raw.githubusercontent.com/google/styleguide/gh-pages/eclipse-java-google-style.xml",
+    profile: "GoogleStyle",
+  },
+  aosp: {
+    url: "https://raw.githubusercontent.com/aosp-mirror/platform_development/master/ide/eclipse/android-formatting.xml",
+    profile: "Android",
+  },
+};
+
 export class JavaLanguageServer {
   private client: LanguageClient | null = null;
-  private stopListener: Disposable | null = null;
+  private listeners: Disposable[] = [];
   private readonly info: InformationView;
 
   /**
@@ -42,6 +76,24 @@ export class JavaLanguageServer {
   private crashTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
 
+  /** The data directory of the most recent launch, so `dispose` can reap it. */
+  private lastDataDir: string | null = null;
+
+  /**
+   * JDT.LS is connected long before it can answer anything: it has to import
+   * the project first, which takes seconds to minutes. Until it reports
+   * ServiceReady, hover and completion return nothing — so we track that
+   * rather than claiming "running" the moment the process is spawned.
+   */
+  private ready = false;
+
+  /**
+   * Serialises every lifecycle transition. Without this, a restart triggered
+   * while another is mid-flight interleaves two launches against one data
+   * directory.
+   */
+  private queue: Promise<void> = Promise.resolve();
+
   constructor(info: InformationView) {
     this.info = info;
   }
@@ -53,14 +105,49 @@ export class JavaLanguageServer {
     return this.client;
   }
 
-  /** Tear down and relaunch the server, resetting any crash backoff. */
-  restart(): void {
-    this.crashCount = 0;
-    this.start();
+  /** Has the server finished importing and started answering requests? */
+  get isReady(): boolean {
+    return this.languageClient != null && this.ready;
   }
 
-  start(): void {
-    this.stop();
+  /** Queue a lifecycle transition behind whatever is already in flight. */
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    this.queue = this.queue.then(work, work);
+    return this.queue;
+  }
+
+  start(): Promise<void> {
+    return this.enqueue(() => this.startNow());
+  }
+
+  /** Tear down and relaunch the server, resetting any crash backoff. */
+  restart(): Promise<void> {
+    return this.enqueue(async () => {
+      this.crashCount = 0;
+      const wasRunning = this.client != null;
+      this.stopNow();
+      // Only wait when there was a JVM holding the workspace lock.
+      if (wasRunning) await delay(RESTART_SETTLE_MS);
+      await this.startNow();
+    });
+  }
+
+  stop(): Promise<void> {
+    return this.enqueue(async () => this.stopNow());
+  }
+
+  /** Stop for good; no further automatic restarts. */
+  dispose(): void {
+    this.disposed = true;
+    this.stopNow();
+    // Best effort: Nova may tear the extension down before this finishes, but
+    // when it does complete it saves the next launch from inheriting an
+    // orphan. A launch reaps on its own regardless.
+    if (this.lastDataDir) void reapOrphanedServers(this.lastDataDir);
+  }
+
+  private async startNow(): Promise<void> {
+    this.stopNow();
     if (this.disposed) return;
 
     const flavor = getConfig<string>(config.lspFlavor) ?? "auto";
@@ -75,10 +162,11 @@ export class JavaLanguageServer {
       this.info.setStatus("failed");
       notify.error(
         "Java JDK not found",
-        "Set “Java JDK Home” in the extension preferences.",
+        `JDT.LS needs Java ${MINIMUM_JAVA_MAJOR} or newer. Set “Java JDK Home” in the extension preferences.`,
       );
       return;
     }
+    this.warnIfJavaTooOld(javaHome);
     this.info.setJavaHome(javaHome);
 
     const serverPath =
@@ -100,14 +188,37 @@ export class JavaLanguageServer {
     this.info.setGradleWrapper(findGradleWrapper() ?? "—");
     this.info.setStatus("starting");
 
+    const dataDir = this.dataDir(projectRoot);
+    this.lastDataDir = dataDir;
+    // We hold no client at this point, so any JVM still sitting on this data
+    // directory is an orphan — from a stop that never took, or from a Nova
+    // that quit without reaping. It holds the Eclipse workspace lock, and the
+    // server we are about to launch would come up unable to take it.
+    await reapOrphanedServers(dataDir);
+
     const identifier = `java-lsp-${++this.generation}`;
+    const serverOptions = this.buildServerOptions(
+      serverPath,
+      javaHome,
+      projectRoot,
+      dataDir,
+    );
+    const clientOptions = this.buildClientOptions(javaHome, projectRoot);
+    console.log(
+      `[lsp] launching ${serverOptions.path} ${JSON.stringify(serverOptions.args)}`,
+    );
+    console.log(
+      `[lsp] bound to syntaxes=${JSON.stringify(clientOptions.syntaxes)} ` +
+        `debug=${clientOptions.debug}`,
+    );
+
     let client: LanguageClient;
     try {
       client = new LanguageClient(
         identifier,
         "Java Language Server",
-        this.buildServerOptions(serverPath, javaHome, projectRoot),
-        this.buildClientOptions(javaHome, projectRoot),
+        serverOptions,
+        clientOptions,
       );
     } catch (err) {
       this.info.setStatus("failed");
@@ -118,19 +229,20 @@ export class JavaLanguageServer {
       return;
     }
 
-    this.stopListener = client.onDidStop((err) => {
-      this.handleDidStop(client, err);
-    });
+    this.attachListeners(client);
 
     try {
       client.start();
       this.client = client;
+      this.ready = false;
+      setRevealClient(client);
       this.startedAt = Date.now();
-      this.info.setStatus("running");
+      // Deliberately not "running": the server is spawned but cannot answer a
+      // request until it reports ServiceReady. See `ready`.
+      this.info.setStatus("starting");
       console.log(`Java language server started (${identifier}).`);
     } catch (err) {
-      this.stopListener?.dispose();
-      this.stopListener = null;
+      this.detachListeners();
       this.info.setStatus("failed");
       notify.error(
         "Could not start the Java language server",
@@ -139,18 +251,107 @@ export class JavaLanguageServer {
     }
   }
 
-  stop(): void {
+  /**
+   * Wire up the server-to-client traffic JDT.LS relies on. Nova surfaces none
+   * of this on its own, so without it the extension is blind to import
+   * progress and to the errors that explain a server which answers nothing.
+   */
+  private attachListeners(client: LanguageClient): void {
+    this.listeners.push(
+      client.onDidStop((err) => {
+        this.handleDidStop(client, err);
+      }),
+    );
+
+    // Everything the server pushes, so the console shows the full picture.
+    for (const method of [
+      "textDocument/publishDiagnostics",
+      "window/showMessage",
+      "telemetry/event",
+      "$/progress",
+    ]) {
+      client.onNotification(method, (params: unknown) => {
+        console.log(`[lsp<-] ${method} ${summarise(params)}`);
+      });
+    }
+
+    // Import progress. JDT.LS emits this throughout startup and it is the only
+    // reliable signal that the server is actually usable.
+    client.onNotification("language/status", (params: unknown) => {
+      const status = params as { type?: string; message?: string };
+      switch (status.type) {
+        case "Starting":
+          this.info.setStatus("starting", status.message);
+          break;
+        case "Started":
+        case "ServiceReady":
+          // JDT.LS sends both; only announce the transition once.
+          if (!this.ready) console.log("Java language server is ready.");
+          this.ready = true;
+          this.info.setStatus("running", status.message);
+          break;
+        case "Error":
+          this.info.setStatus("failed", status.message);
+          console.error(`Java language server error: ${status.message ?? ""}`);
+          break;
+        default:
+          break;
+      }
+    });
+
+    // Server-side logs. The reason an import failed only ever appears here.
+    client.onNotification("window/logMessage", (params: unknown) => {
+      const log = params as { type?: number; message?: string };
+      if (!log.message) return;
+      if (log.type === 1) console.error(`[jdtls] ${log.message}`);
+      else if (log.type === 2) console.warn(`[jdtls] ${log.message}`);
+    });
+
+    // JDT.LS pulls settings back out of the client; answering with our own
+    // configuration keeps the two in step after a live settings change.
+    client.onRequest("workspace/configuration", (params: unknown) => {
+      const items =
+        (params as { items?: { section?: string }[] } | undefined)?.items ?? [];
+      const settings = this.buildJavaSettings();
+      return items.map((item) => resolveSection(settings, item.section));
+    });
+  }
+
+  private detachListeners(): void {
+    for (const listener of this.listeners) listener.dispose();
+    this.listeners = [];
+  }
+
+  /**
+   * Push the current settings to a running server. Most preferences take
+   * effect this way, so a restart — which costs a full project re-import — is
+   * only warranted for the ones that change how the process is launched.
+   */
+  applySettings(): void {
+    const client = this.languageClient;
+    if (!client) return;
+    try {
+      client.sendNotification("workspace/didChangeConfiguration", {
+        settings: this.buildJavaSettings(),
+      });
+    } catch (err) {
+      console.error("Could not push Java settings to the server:", String(err));
+    }
+  }
+
+  private stopNow(): void {
     if (this.crashTimer != null) {
       clearTimeout(this.crashTimer);
       this.crashTimer = undefined;
     }
     // Detach first: a deliberate stop must not be mistaken for a crash and
     // trigger the auto-restart path.
-    this.stopListener?.dispose();
-    this.stopListener = null;
+    this.detachListeners();
 
     const client = this.client;
     this.client = null;
+    this.ready = false;
+    setRevealClient(null);
     if (client) {
       this.stoppingIntentionally = true;
       try {
@@ -164,10 +365,14 @@ export class JavaLanguageServer {
     this.info.setStatus("stopped");
   }
 
-  /** Stop for good; no further automatic restarts. */
-  dispose(): void {
-    this.disposed = true;
-    this.stop();
+  private warnIfJavaTooOld(javaHome: string): void {
+    const major = parseJavaMajor(nova.path.basename(javaHome));
+    if (major != null && major < MINIMUM_JAVA_MAJOR) {
+      notify.warn(
+        `Java ${major} is too old for the language server`,
+        `Eclipse JDT.LS needs Java ${MINIMUM_JAVA_MAJOR} or newer. Set “Java JDK Home” to a newer JDK.`,
+      );
+    }
   }
 
   /**
@@ -180,8 +385,9 @@ export class JavaLanguageServer {
     if (this.stoppingIntentionally || this.disposed) return;
 
     this.client = null;
-    this.stopListener?.dispose();
-    this.stopListener = null;
+    this.ready = false;
+    setRevealClient(null);
+    this.detachListeners();
     this.info.setStatus(err ? "failed" : "stopped");
     if (err) console.error("Java language server stopped:", String(err));
 
@@ -197,15 +403,15 @@ export class JavaLanguageServer {
       return;
     }
 
-    const delay = 1000 * 2 ** this.crashCount;
+    const backoff = 1000 * 2 ** this.crashCount;
     this.crashCount++;
     console.log(
-      `Java language server exited unexpectedly; restarting in ${delay}ms (attempt ${this.crashCount}/${MAX_CRASH_RESTARTS}).`,
+      `Java language server exited unexpectedly; restarting in ${backoff}ms (attempt ${this.crashCount}/${MAX_CRASH_RESTARTS}).`,
     );
     this.crashTimer = setTimeout(() => {
       this.crashTimer = undefined;
-      this.start();
-    }, delay);
+      void this.start();
+    }, backoff);
   }
 
   /**
@@ -219,11 +425,7 @@ export class JavaLanguageServer {
       "workspaces",
       `${nova.path.basename(projectRoot)}-${hashPath(projectRoot)}`,
     );
-    try {
-      nova.fs.mkdir(dir);
-    } catch {
-      // Already exists.
-    }
+    mkdirRecursive(dir);
     return dir;
   }
 
@@ -231,85 +433,335 @@ export class JavaLanguageServer {
     serverPath: string,
     javaHome: string,
     projectRoot: string,
+    dataDir: string,
   ): ServerOptions {
-    const dataDir = this.dataDir(projectRoot);
     const isScript =
       serverPath.endsWith("jdtls") || !serverPath.endsWith(".jar");
 
-    const argv = isScript
-      ? [serverPath, "-configuration", findJdtlsConfigPath(), "-data", dataDir]
-      : [
-          findJavaExecutable(),
-          "-Declipse.application=org.eclipse.jdt.ls.core.id1",
-          "-Dosgi.bundles.defaultStartLevel=4",
-          "-Declipse.product=org.eclipse.jdt.ls.core.product",
-          "-Dlog.level=ALL",
-          "-Xmx1G",
-          "--add-modules=ALL-SYSTEM",
-          "--add-opens",
-          "java.base/java.util=ALL-UNNAMED",
-          "--add-opens",
-          "java.base/java.lang=ALL-UNNAMED",
-          "-jar",
-          serverPath,
-          "-configuration",
-          findJdtlsConfigPath(),
-          "-data",
-          dataDir,
-        ];
+    let argv: string[];
+    if (isScript) {
+      // The `jdtls` launcher picks the Equinox configuration itself — it sets
+      // a read-only shared configuration area that cascades into a writable
+      // per-workspace one. Passing `-configuration` here overrides that with a
+      // directory inside the (read-only) install prefix, and the server then
+      // comes up unable to answer requests.
+      argv = [serverPath, "-data", dataDir];
+    } else {
+      const configPath = findJdtlsConfigPath(serverPath);
+      argv = [
+        findJavaExecutable(),
+        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+        "-Dosgi.bundles.defaultStartLevel=4",
+        "-Declipse.product=org.eclipse.jdt.ls.core.product",
+        "-Dlog.level=ALL",
+        "-Xmx1G",
+        "--add-modules=ALL-SYSTEM",
+        "--add-opens",
+        "java.base/java.util=ALL-UNNAMED",
+        "--add-opens",
+        "java.base/java.lang=ALL-UNNAMED",
+        "-jar",
+        serverPath,
+        ...(configPath ? ["-configuration", configPath] : []),
+        "-data",
+        dataDir,
+      ];
+    }
+
+    const command = argv.map(shellQuote).join(" ");
 
     // Nova's ServerOptions has no `cwd`, so go through a shell to place the
     // server in the configured project root. JDT.LS resolves relative build
     // files (and Gradle's project discovery) against its working directory.
     return {
+      type: "stdio",
       path: "/bin/sh",
       args: [
         "-c",
-        `cd ${shellQuote(projectRoot)} && exec ${argv.map(shellQuote).join(" ")}`,
+        `cd ${shellQuote(projectRoot)} && ${this.wrapWithShim(command, dataDir)}`,
       ],
       env: { JAVA_HOME: javaHome },
     };
   }
 
+  /**
+   * Launch the server behind the LSP shim.
+   *
+   * Nova advertises `dynamicRegistration: true` for hover, completion,
+   * definition, signatureHelp, documentHighlight and codeAction. JDT.LS
+   * therefore leaves all of them out of its `initialize` response and
+   * announces them later with `client/registerCapability` — which Nova
+   * acknowledges and then ignores, so it never sends those requests at all.
+   * That is why hover did nothing while references, formatting and rename
+   * (still declared statically) kept working.
+   *
+   * The shim clears those flags on the way past, so the server declares its
+   * capabilities statically and Nova wires them up. It also takes the JVM down
+   * with it when Nova closes the pipe, and optionally records the traffic.
+   */
+  private wrapWithShim(command: string, dataDir: string): string {
+    const python = findPython();
+    const shim = nova.path.join(nova.extension.path, "Scripts", "lsp-shim.py");
+
+    if (!python || !nova.fs.access(shim, nova.fs.F_OK)) {
+      console.error(
+        "Could not find python3 or the LSP shim; launching the server " +
+          "directly. Hover, completion and go-to-definition will not work, " +
+          "because Nova ignores this server's dynamic capability registrations.",
+      );
+      return `exec ${command}`;
+    }
+
+    const tracing =
+      FORCE_TRACE || getConfig<boolean>(config.logServerTrace) === true;
+    if (tracing) console.log(`Logging LSP traffic to ${dataDir}/lsp-*.log`);
+    const log = tracing ? ` --log ${shellQuote(dataDir)}` : "";
+
+    // `exec` so the shim replaces the shell and is Nova's direct child: it can
+    // then reap the JVM when Nova closes the pipe.
+    return `exec ${shellQuote(python)} ${shellQuote(shim)}${log} -- ${command}`;
+  }
+
+  /** The `java.*` settings tree, shared by initialization and live updates. */
+  private buildJavaSettings(): Record<string, unknown> {
+    const javaHome = findJavaHome();
+    const lintEnabled = (getConfig<boolean>(config.lintEnabled) ?? true) === true;
+
+    const java: Record<string, unknown> = {
+      configuration: { updateBuildConfiguration: "automatic" },
+      format: {
+        enabled: true,
+        settings: this.formatterSettings(),
+      },
+      autobuild: { enabled: true },
+      errors: {
+        incompleteClasspath: { severity: lintEnabled ? "warning" : "ignore" },
+      },
+      completion: { enabled: true, guessMethodArguments: true },
+      signatureHelp: { enabled: true },
+      contentProvider: { preferred: "fernflower" },
+      referencesCodeLens: { enabled: false },
+      inlayHints: {
+        parameterNames: {
+          enabled: getConfig<string>(config.inlayParameterNames) ?? "none",
+        },
+      },
+      project: this.projectSettings(),
+    };
+    if (javaHome) java.home = javaHome;
+
+    return { java };
+  }
+
+  /**
+   * Map the style preset onto an Eclipse formatter profile. JDT.LS has no
+   * built-in notion of "Google style"; it loads a formatter XML from
+   * `format.settings.url`, so a preset that is never translated into one
+   * silently does nothing.
+   */
+  private formatterSettings(): Record<string, unknown> {
+    const style = getConfig<string>(config.formatStyle) ?? "google";
+
+    if (style === "custom") {
+      const url = getConfig<string>(config.formatSettingsUrl);
+      return url ? { url: expandPath(url) } : {};
+    }
+    // Palantir is not an Eclipse profile — it is only reachable through the
+    // Spotless formatter, which is a separate setting.
+    if (style === "palantir") {
+      console.warn(
+        "Palantir formatting is only available with the Spotless formatter; " +
+          "the language server will use its default style.",
+      );
+      return {};
+    }
+    const profile = FORMATTER_PROFILES[style];
+    return profile ? { url: profile.url, profile: profile.profile } : {};
+  }
+
+  /** Per-workspace project layout overrides, omitted when unset. */
+  private projectSettings(): Record<string, unknown> {
+    const settings: Record<string, unknown> = {};
+
+    const sourcePaths = getConfig<string[]>(config.sourcePaths);
+    if (sourcePaths?.length) settings.sourcePaths = sourcePaths;
+
+    const outputPath = getConfig<string>(config.outputPath);
+    if (outputPath?.trim()) settings.outputPath = outputPath.trim();
+
+    const libraries = getConfig<string[]>(config.referencedLibraries);
+    if (libraries?.length) settings.referencedLibraries = libraries;
+
+    return settings;
+  }
+
   private buildClientOptions(
-    javaHome: string,
+    _javaHome: string,
     projectRoot: string,
   ): {
     syntaxes: string[];
+    debug: boolean;
     initializationOptions: Record<string, unknown>;
   } {
-    const lintEnabled =
-      (getConfig<boolean>(config.lintEnabled) ?? true) === true;
-
     return {
       syntaxes: ["java"],
+      // Nova 10+: mirrors the LSP conversation into the Extension Console.
+      // Off by default because it is noisy and costs throughput, but it is the
+      // only way to see why a request came back empty.
+      debug: FORCE_TRACE || getConfig<boolean>(config.logServerTrace) === true,
       initializationOptions: {
         workspaceFolders: [`file://${projectRoot}`],
-        settings: {
-          java: {
-            home: javaHome,
-            configuration: { updateBuildConfiguration: "automatic" },
-            format: { enabled: true },
-            autobuild: { enabled: true },
-            errors: {
-              incompleteClasspath: {
-                severity: lintEnabled ? "warning" : "ignore",
-              },
-            },
-            completion: { enabled: true, guessMethodArguments: true },
-            signatureHelp: { enabled: true },
-            contentProvider: { preferred: "fernflower" },
-            referencesCodeLens: { enabled: false },
-            inlayHints: {
-              parameterNames: {
-                enabled:
-                  getConfig<string>(config.inlayParameterNames) ?? "none",
-              },
-            },
-          },
+        settings: this.buildJavaSettings(),
+        extendedClientCapabilities: {
+          classFileContentsSupport: true,
+          overrideMethodsPromptSupport: false,
+          advancedOrganizeImportsSupport: true,
+          advancedGenerateAccessorsSupport: false,
         },
       },
     };
+  }
+}
+
+/** A short, safe one-line rendering of an LSP payload for the console. */
+function summarise(params: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(params) ?? String(params);
+  } catch {
+    return "(unserialisable)";
+  }
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The marker every JDT.LS JVM carries, whatever launcher started it. */
+const JDTLS_MARKER = "org.eclipse.jdt.ls.core.id1";
+
+/**
+ * Kill any JDT.LS still running against `dataDir`.
+ *
+ * `client.stop()` asks the server to shut down over LSP, which a healthy
+ * server honours and a wedged or mid-import one ignores — and Nova does not
+ * escalate. The JVM then outlives its client, keeps the Eclipse workspace
+ * lock, and every subsequent launch comes up unable to take it. Since the
+ * launcher chain is all `exec`, the JVM is a single process we can signal
+ * directly.
+ *
+ * Only processes matching *both* the JDT.LS marker and this exact data
+ * directory are touched, so another project's server — or an unrelated JVM —
+ * is never a candidate.
+ */
+async function reapOrphanedServers(dataDir: string): Promise<void> {
+  let pids = await findServerPids(dataDir);
+  if (pids.length === 0) return;
+
+  console.warn(
+    `Found ${pids.length} orphaned Java language server process(es) holding ` +
+      `"${dataDir}": ${pids.join(", ")}. Terminating before restart.`,
+  );
+  await signal("TERM", pids);
+
+  // Give the JVM a moment to go down cleanly, then insist.
+  for (let attempt = 0; attempt < 12; attempt++) {
+    await delay(250);
+    pids = await findServerPids(dataDir);
+    if (pids.length === 0) return;
+  }
+
+  console.warn(`Orphans ${pids.join(", ")} ignored SIGTERM; sending SIGKILL.`);
+  await signal("KILL", pids);
+  await delay(250);
+
+  const survivors = await findServerPids(dataDir);
+  if (survivors.length > 0) {
+    console.error(
+      `Could not terminate Java language server process(es): ${survivors.join(", ")}.`,
+    );
+  }
+}
+
+/** PIDs of JDT.LS processes using `dataDir`. */
+async function findServerPids(dataDir: string): Promise<string[]> {
+  // One `ps` and match in JS: no shell, so nothing in the path can be
+  // interpreted as a pattern or an argument.
+  const output = await runCommand("/bin/ps", ["-Ao", "pid=,command="]);
+  const pids: string[] = [];
+  for (const line of output.split("\n")) {
+    if (!line.includes(JDTLS_MARKER)) continue;
+    if (!line.includes(`-data ${dataDir}`)) continue;
+    const pid = line.trim().split(/\s+/)[0];
+    if (/^\d+$/.test(pid)) pids.push(pid);
+  }
+  return pids;
+}
+
+async function signal(name: "TERM" | "KILL", pids: string[]): Promise<void> {
+  if (pids.length === 0) return;
+  try {
+    await runCommand("/bin/kill", [`-${name}`, ...pids]);
+  } catch (err) {
+    // A process that exited between listing and signalling is the common case.
+    console.log(`kill -${name} ${pids.join(" ")}: ${String(err)}`);
+  }
+}
+
+/** Run a command to completion and return its stdout. */
+function runCommand(path: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let out = "";
+    try {
+      const process = new Process(path, {
+        args,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      process.onStdout((line) => {
+        out += line;
+      });
+      process.onDidExit(() => resolve(out));
+      process.start();
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+}
+
+/**
+ * Look a dotted `section` up in a settings tree, the way an LSP client is
+ * expected to answer `workspace/configuration`.
+ */
+function resolveSection(
+  settings: Record<string, unknown>,
+  section: string | undefined,
+): unknown {
+  if (!section) return settings;
+  let current: unknown = settings;
+  for (const part of section.split(".")) {
+    if (current == null || typeof current !== "object") return null;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current ?? null;
+}
+
+/**
+ * `nova.fs.mkdir` creates a single directory, so a nested path fails unless
+ * every parent already exists. Walk down and create each level.
+ */
+function mkdirRecursive(path: string): void {
+  const parts = path.split("/").filter((p) => p.length > 0);
+  let current = "";
+  for (const part of parts) {
+    current += `/${part}`;
+    if (nova.fs.access(current, nova.fs.F_OK)) continue;
+    try {
+      nova.fs.mkdir(current);
+    } catch (err) {
+      console.error(`Could not create "${current}":`, String(err));
+      return;
+    }
   }
 }
 

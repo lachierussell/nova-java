@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { applyPlanToText, planTextEdits } from "./applyEdits";
+import {
+  applyPlanToText,
+  groupWorkspaceEdit,
+  planTextEdits,
+} from "./applyEdits";
 import { LspTextEdit, lspRangeToOffsets } from "./lspNovaConversions";
 
 /** Build an edit from 1-based-free line/character coordinates. */
@@ -153,5 +157,45 @@ describe("lspRangeToOffsets", () => {
     expect(lspRangeToOffsets(text, edit(9, 0, 9, 0, "").range).start).toBe(
       text.length + 1,
     );
+  });
+});
+
+describe("groupWorkspaceEdit", () => {
+  const uri = "file:///a/A.java";
+
+  it("merges repeated entries for one document instead of dropping them", () => {
+    // JDT.LS splits a rename into several entries for the same file. Keeping
+    // only the last applied a fraction of the rename and left the file broken.
+    const grouped = groupWorkspaceEdit({
+      documentChanges: [
+        { textDocument: { uri }, edits: [edit(0, 0, 0, 3, "Foo")] },
+        { textDocument: { uri }, edits: [edit(4, 0, 4, 3, "Foo")] },
+      ],
+    });
+    expect(grouped.get(uri)).toHaveLength(2);
+  });
+
+  it("skips create/rename/delete operations, which carry no edits", () => {
+    const grouped = groupWorkspaceEdit({
+      documentChanges: [
+        { kind: "create", uri: "file:///a/B.java" },
+        { textDocument: { uri }, edits: [edit(0, 0, 0, 1, "x")] },
+      ] as never,
+    });
+    expect([...grouped.keys()]).toEqual([uri]);
+  });
+
+  it("falls back to `changes` only when there are no documentChanges", () => {
+    const grouped = groupWorkspaceEdit({ changes: { [uri]: [edit(0, 0, 0, 1, "x")] } });
+    expect(grouped.get(uri)).toHaveLength(1);
+  });
+
+  it("prefers documentChanges over changes when both are present", () => {
+    const other = "file:///a/B.java";
+    const grouped = groupWorkspaceEdit({
+      documentChanges: [{ textDocument: { uri }, edits: [edit(0, 0, 0, 1, "x")] }],
+      changes: { [other]: [edit(0, 0, 0, 1, "y")] },
+    });
+    expect([...grouped.keys()]).toEqual([uri]);
   });
 });

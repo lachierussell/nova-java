@@ -14,8 +14,14 @@ export const config = {
   organizeImportsOnSave: "java.format.organizeImportsOnSave",
   formatStyle: "java.format.style",
   formatter: "java.format.formatter",
+  spotlessOffline: "java.format.spotlessOffline",
+
+  formatSettingsUrl: "java.format.settings.url",
 
   lintEnabled: "java.lint.enabled",
+
+  /** Logs LSP traffic to the Extension Console (Nova 10+ `debug` option). */
+  logServerTrace: "java.debug.logServerTrace",
 
   inlayParameterNames: "java.inlayHints.parameterNames",
   inlayVariableTypes: "java.inlayHints.variableTypes",

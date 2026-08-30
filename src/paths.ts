@@ -5,22 +5,74 @@
 import { config, getConfig } from "./config";
 import { expandPath, fileExists } from "./novaUtils";
 
+/** Eclipse JDT.LS refuses to launch on anything older than this. */
+export const MINIMUM_JAVA_MAJOR = 21;
+
+/**
+ * The major version in a Java version string or a JDK directory name.
+ *
+ * Handles the modern scheme ("21.0.1" → 21), the legacy one where the real
+ * major version is the second component ("1.8.0_401" → 8), and vendor
+ * directory names ("temurin-17.jdk" → 17). Returns null when there is no
+ * version to find.
+ */
+export function parseJavaMajor(value: string): number | null {
+  const trimmed = value.trim().replace(/\.jdk$/, "");
+  const match = /(\d+)(?:\.(\d+))?/.exec(trimmed);
+  if (!match) return null;
+  const first = Number(match[1]);
+  // "1.8.0_401" and friends: the leading 1 is the product line, not the
+  // version, so the major version is the component after it.
+  if (first === 1 && match[2] != null) return Number(match[2]);
+  return first;
+}
+
+/**
+ * Order JDK directory names newest-first, by version rather than lexically.
+ *
+ * A lexical sort puts "jdk-8.jdk" above "jdk-21.jdk", which handed the
+ * language server a Java it refuses to run on — the process then died before
+ * answering a single request. Names we cannot parse sink below real versions.
+ */
+export function sortJdkDirectoriesNewestFirst(
+  names: readonly string[],
+): string[] {
+  return [...names].sort((a, b) => {
+    const va = parseJavaMajor(a);
+    const vb = parseJavaMajor(b);
+    if (va == null && vb == null) return a.localeCompare(b);
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    if (va !== vb) return vb - va;
+    return a.localeCompare(b);
+  });
+}
+
 /**
  * Locate a usable JAVA_HOME. Resolution order:
  *   1. Workspace / global `java.jdk.home` setting.
  *   2. jenv (best effort).
  *   3. The JAVA_HOME environment variable.
  *   4. The newest JDK under the standard macOS VM directories.
+ *
+ * Every candidate but the explicitly configured one must satisfy
+ * `MINIMUM_JAVA_MAJOR`; launching JDT.LS on an older JDK just kills the
+ * server at startup, which looks to the user like a language server that
+ * silently does nothing.
  */
 export function findJavaHome(): string | null {
   const configured = getConfig<string>(config.jdkHome);
+  // An explicit setting is honoured as-is: if the user pointed us at a JDK,
+  // a version complaint is more useful than silently ignoring their choice.
   if (configured && fileExists(configured)) return configured;
 
   const jenvHome = findJavaHomeViaJenv();
-  if (jenvHome) return jenvHome;
+  if (jenvHome && javaHomeIsUsable(jenvHome)) return jenvHome;
 
   const envHome = nova.environment["JAVA_HOME"];
-  if (envHome && fileExists(envHome)) return envHome;
+  if (envHome && fileExists(envHome) && javaHomeIsUsable(envHome)) {
+    return envHome;
+  }
 
   const vmDirs = [
     "/Library/Java/JavaVirtualMachines",
@@ -33,14 +85,25 @@ export function findJavaHome(): string | null {
     } catch {
       continue;
     }
-    // Newest version first (naive but works for `jdk-XX.jdk` naming).
-    for (const dir of contents.sort().reverse()) {
+    for (const dir of sortJdkDirectoriesNewestFirst(contents)) {
+      const major = parseJavaMajor(dir);
+      if (major != null && major < MINIMUM_JAVA_MAJOR) continue;
       const home = nova.path.join(base, dir, "Contents", "Home");
       if (fileExists(home)) return home;
     }
   }
 
   return null;
+}
+
+/**
+ * Is this JDK new enough for JDT.LS? The directory name is the only version
+ * we can read without spawning a process, so an unparseable name is accepted
+ * rather than discarded — the server itself will complain if it is too old.
+ */
+function javaHomeIsUsable(home: string): boolean {
+  const major = parseJavaMajor(nova.path.basename(home));
+  return major == null || major >= MINIMUM_JAVA_MAJOR;
 }
 
 /**
@@ -89,6 +152,31 @@ export function findJavaExecutable(): string {
   return "java";
 }
 
+/**
+ * A Python 3 interpreter for the LSP shim, or null if none is available.
+ *
+ * macOS ships one at /usr/bin/python3 with the Command Line Tools, and the
+ * Homebrew `jdtls` launcher is itself a Python script, so on any machine that
+ * can run the server this should resolve.
+ */
+export function findPython(): string | null {
+  const candidates = [
+    "/usr/bin/python3",
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+  ];
+  for (const path of candidates) {
+    if (nova.fs.access(path, nova.fs.X_OK)) return path;
+  }
+  const pathEnv = nova.environment["PATH"] ?? "";
+  for (const dir of pathEnv.split(":")) {
+    if (!dir) continue;
+    const candidate = nova.path.join(dir, "python3");
+    if (nova.fs.access(candidate, nova.fs.X_OK)) return candidate;
+  }
+  return null;
+}
+
 /** Locate the `jdtls` launcher script or its equinox launcher JAR. */
 export function findJdtls(): string | null {
   const commonPaths = [
@@ -134,34 +222,37 @@ function resolveGlob(pattern: string): string | null {
   return null;
 }
 
-/** The platform-specific jdtls configuration directory. */
-export function findJdtlsConfigPath(): string {
-  const platform = detectJdtlsPlatform();
-  const configPaths = [
-    `/opt/homebrew/opt/jdtls/libexec/${platform}`,
-    `/usr/local/opt/jdtls/libexec/${platform}`,
-    `/opt/homebrew/share/jdtls/${platform}`,
-    `/usr/local/share/jdtls/${platform}`,
-    nova.path.join(nova.extension.path, "jdtls", platform),
-  ];
-  for (const path of configPaths) {
+/**
+ * The Equinox configuration directory that goes with a launcher JAR.
+ *
+ * Only needed when we launch the raw `org.eclipse.equinox.launcher_*.jar`
+ * ourselves. The `jdtls` wrapper script sets its own configuration area (and
+ * marks it read-only, cascading into a per-workspace one), so passing
+ * `-configuration` alongside it points Equinox at a directory it must write to
+ * but cannot — which is how a server that "starts" ends up answering nothing.
+ *
+ * The JAR always lives in `<install>/plugins/`, so its install root is known
+ * exactly; that beats guessing the platform from environment variables that
+ * are shell-local and never set for a process Nova spawns.
+ */
+export function findJdtlsConfigPath(launcherJar: string): string | null {
+  const installRoot = nova.path.dirname(nova.path.dirname(launcherJar));
+  // Most specific first: an Apple-silicon build ships both, and the arm
+  // directory is the one that matches the JVM we launch.
+  const candidates = fileExists("/opt/homebrew")
+    ? ["config_mac_arm", "config_mac", "config_linux_arm", "config_linux"]
+    : ["config_mac", "config_mac_arm", "config_linux", "config_linux_arm"];
+
+  for (const name of candidates) {
+    const path = nova.path.join(installRoot, name);
     if (fileExists(path)) return path;
   }
-  console.warn("Could not find a jdtls config directory; using a best guess.");
-  return `/opt/homebrew/opt/jdtls/libexec/${platform}`;
-}
 
-function detectJdtlsPlatform(): string {
-  const home = nova.environment["HOME"] ?? "";
-  const isMac = home.startsWith("/Users/");
-  const hosttype = nova.environment["HOSTTYPE"] ?? "";
-  const machtype = nova.environment["MACHTYPE"] ?? "";
-  let isArm = /arm|aarch/.test(hosttype) || /arm|aarch/.test(machtype);
-  // If the env vars are unset, infer from the Homebrew prefix.
-  if (!isArm && isMac) isArm = fileExists("/opt/homebrew");
-
-  if (isMac) return isArm ? "config_mac_arm" : "config_mac";
-  return isArm ? "config_linux_arm" : "config_linux";
+  console.warn(
+    `No Equinox configuration directory found under "${installRoot}"; ` +
+      "launching without -configuration.",
+  );
+  return null;
 }
 
 // ---------------------------------------------------------------------------

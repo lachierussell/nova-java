@@ -1,4 +1,4 @@
-import { config, getOverridableBoolean } from "./config";
+import { config, getConfig, getOverridableBoolean } from "./config";
 import { wrapCommand } from "./novaUtils";
 import { notify } from "./notify";
 import { JavaLanguageServer } from "./lspClient";
@@ -27,11 +27,13 @@ export function activate(): void {
 
   server = new JavaLanguageServer(infoView);
 
+  logResolvedConfig();
   registerCommands();
   registerSaveListeners();
   registerConfigReload();
+  registerEventLogging();
 
-  server.start();
+  void server.start();
   console.log("Java extension activated.");
 }
 
@@ -44,16 +46,36 @@ export function deactivate(): void {
   symbolsView = null;
 }
 
+/**
+ * The live client, or null after telling the user why there isn't one.
+ *
+ * "Still importing" is a distinct state worth naming: JDT.LS accepts the
+ * connection long before it can answer, so a command run too early comes back
+ * empty and looks like a broken extension rather than a busy one.
+ */
+function requireClient(): LanguageClient | null {
+  const client = server?.languageClient ?? null;
+  if (!client) {
+    notify.warn("The Java language server is not running.");
+    return null;
+  }
+  if (server && !server.isReady) {
+    notify.info(
+      "The Java language server is still starting",
+      "It is importing the project — try again in a moment.",
+    );
+    return null;
+  }
+  return client;
+}
+
 /** Run an editor command that needs a live client and the active editor. */
 function editorCommand(
   fn: (client: LanguageClient, editor: TextEditor) => Promise<void>,
 ): (editor: TextEditor) => Promise<void> {
   return async (editor: TextEditor) => {
-    const client = server?.languageClient;
-    if (!client) {
-      notify.warn("The Java language server is not running.");
-      return;
-    }
+    const client = requireClient();
+    if (!client) return;
     await fn(client, editor);
   };
 }
@@ -75,11 +97,8 @@ function registerCommands(): void {
   reg("java.openLocation", () => referencesView?.openSelected());
 
   reg("java.findSymbols", async () => {
-    const client = server?.languageClient;
-    if (!client) {
-      notify.warn("The Java language server is not running.");
-      return;
-    }
+    const client = requireClient();
+    if (!client) return;
     await lsp.findWorkspaceSymbol(client, symbolsView!);
   });
   reg("java.openSymbol", () => symbolsView?.openSelected());
@@ -141,14 +160,121 @@ function settle(): Promise<void> {
 // Restart the server when settings that change how it launches are edited.
 // ---------------------------------------------------------------------------
 
+/**
+ * Log editor and document events to the Extension Console.
+ *
+ * The decisive fact is each document's `syntax`: Nova routes hover and
+ * completion to a language client only for the syntaxes named in its
+ * `clientOptions.syntaxes` — here, exactly `"java"`. A `.java` file reported as
+ * anything else (or as null) means the editor never sends the request at all,
+ * which from the outside is indistinguishable from a server that answered
+ * nothing.
+ *
+ * Unconditional while we chase that: a preference-gated version of this
+ * produced no output, and a diagnostic you have to switch on is a diagnostic
+ * that doesn't run.
+ */
+function registerEventLogging(): void {
+  const describe = (doc: TextDocument) =>
+    `${doc.path ? nova.path.basename(doc.path) : "(untitled)"} ` +
+    `syntax=${JSON.stringify(doc.syntax)}`;
+
+  console.log(
+    `[events] workspace path=${JSON.stringify(nova.workspace.path)} ` +
+      `openEditors=${nova.workspace.textEditors.length}`,
+  );
+
+  disposables.add(
+    nova.workspace.onDidAddTextEditor((editor) => {
+      const doc = editor.document;
+      console.log(
+        `[events] editor opened: ${describe(doc)} ` +
+          `isJava=${doc.syntax === "java"} uri=${doc.uri}`,
+      );
+      if (doc.path?.endsWith(".java") && doc.syntax !== "java") {
+        console.error(
+          `[events] MISMATCH: ${nova.path.basename(doc.path)} is a .java file ` +
+            `but Nova reports syntax=${JSON.stringify(doc.syntax)}. The language ` +
+            `client is bound to "java", so Nova will not send hover or ` +
+            `completion for this editor.`,
+        );
+      }
+
+      disposables.add(
+        editor.onDidStopChanging((ed) =>
+          console.log(`[events] stopped changing: ${describe(ed.document)}`),
+        ),
+      );
+      disposables.add(
+        editor.onDidSave((ed) =>
+          console.log(`[events] saved: ${describe(ed.document)}`),
+        ),
+      );
+      disposables.add(
+        editor.onDidDestroy((ed) =>
+          console.log(`[events] editor closed: ${describe(ed.document)}`),
+        ),
+      );
+    }),
+  );
+}
+
+/** Dump the settings the extension actually resolved, and where from. */
+function logResolvedConfig(): void {
+  for (const key of Object.values(config)) {
+    const workspace = nova.workspace?.config.get(key) ?? null;
+    const global = nova.config.get(key) ?? null;
+    console.log(
+      `[config] ${key} = ${JSON.stringify(getConfig(key))} ` +
+        `(workspace=${JSON.stringify(workspace)}, global=${JSON.stringify(global)})`,
+    );
+  }
+}
+
+/**
+ * Watch a setting and react only when its effective value actually changed.
+ *
+ * A key has to be observed both globally and per-workspace, and a single edit
+ * fires on both — so an unguarded listener runs its callback twice. That is
+ * cheap for most things and ruinous for a restart: each one costs JDT.LS a
+ * full project re-import, during which the server answers nothing. Comparing
+ * against the last value collapses the duplicates. (Pattern from nova-gobee.)
+ */
+function watchConfig(key: string, onChange: () => void): void {
+  let previous = JSON.stringify(getConfig(key) ?? null);
+  const handler = () => {
+    const next = JSON.stringify(getConfig(key) ?? null);
+    if (next === previous) return;
+    previous = next;
+    onChange();
+  };
+  disposables.add(nova.config.onDidChange(key, handler));
+  if (nova.workspace) {
+    disposables.add(nova.workspace.config.onDidChange(key, handler));
+  }
+}
+
 function registerConfigReload(): void {
-  const keys = [
+  // Changing these changes how the process is launched, so the server has to
+  // come back up. Everything else is pushed to the running server instead.
+  const relaunchKeys = [
     config.lspFlavor,
     config.lspPath,
     config.jdkHome,
+    config.projectRoot,
+    config.logServerTrace,
+  ];
+
+  // These are plain settings: JDT.LS applies them from a
+  // workspace/didChangeConfiguration notification, no restart required.
+  const liveKeys = [
     config.lintEnabled,
     config.inlayParameterNames,
-    config.projectRoot,
+    config.formatStyle,
+    config.formatSettingsUrl,
+    config.sourcePaths,
+    config.outputPath,
+    config.referencedLibraries,
   ];
 
   let pending: ReturnType<typeof setTimeout> | undefined;
@@ -157,14 +283,10 @@ function registerConfigReload(): void {
     // Debounce so editing several settings in a row restarts only once.
     pending = setTimeout(() => {
       pending = undefined;
-      server?.restart();
+      void server?.restart();
     }, 500);
   };
 
-  for (const key of keys) {
-    disposables.add(nova.config.onDidChange(key, scheduleRestart));
-    if (nova.workspace) {
-      disposables.add(nova.workspace.config.onDidChange(key, scheduleRestart));
-    }
-  }
+  for (const key of relaunchKeys) watchConfig(key, scheduleRestart);
+  for (const key of liveKeys) watchConfig(key, () => server?.applySettings());
 }
