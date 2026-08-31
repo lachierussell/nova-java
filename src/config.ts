@@ -24,7 +24,6 @@ export const config = {
   logServerTrace: "java.debug.logServerTrace",
 
   inlayParameterNames: "java.inlayHints.parameterNames",
-  inlayVariableTypes: "java.inlayHints.variableTypes",
 
   // Workspace-specific project settings.
   projectRoot: "java.project.root",
@@ -44,13 +43,12 @@ export function getConfig<T = unknown>(key: string): T | null {
 }
 
 /**
- * Read a boolean setting whose workspace form is a three-way enum
- * ("Inherit from Global Settings" | "Enable" | "Disable", or null | true |
- * false), falling back to the global boolean.
+ * Read a boolean setting whose workspace form is a three-way enum: true,
+ * false, or null for "Inherit from Global Settings". Only null falls through
+ * to the global value, so a workspace `false` overrides a global `true`.
  */
 export function getOverridableBoolean(key: string): boolean {
   const workspace = nova.workspace?.config.get(key);
-  if (workspace === true || workspace === "Enable") return true;
-  if (workspace === false || workspace === "Disable") return false;
+  if (typeof workspace === "boolean") return workspace;
   return (nova.config.get(key, "boolean") as boolean | null) ?? false;
 }

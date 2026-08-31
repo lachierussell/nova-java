@@ -97,25 +97,37 @@ export function findJavaHome(): string | null {
 }
 
 /**
- * Is this JDK new enough for JDT.LS? The directory name is the only version
- * we can read without spawning a process, so an unparseable name is accepted
- * rather than discarded — the server itself will complain if it is too old.
+ * The Java version a JAVA_HOME points at, read from its path.
+ *
+ * The version lives in the JDK's own directory name, which is not the last
+ * component: a macOS JAVA_HOME ends in `…/jdk-21.jdk/Contents/Home`. Walk the
+ * path from the end and take the first component that carries a version, so
+ * both that layout and a bare `…/versions/21.0.1` are read correctly. Null
+ * when no component names a version — the server itself will then complain if
+ * it turns out to be too old.
  */
+export function javaMajorForHome(home: string): number | null {
+  const parts = home.split("/").filter((p) => p.length > 0).reverse();
+  for (const part of parts) {
+    const major = parseJavaMajor(part);
+    if (major != null) return major;
+  }
+  return null;
+}
+
 function javaHomeIsUsable(home: string): boolean {
-  const major = parseJavaMajor(nova.path.basename(home));
+  const major = javaMajorForHome(home);
   return major == null || major >= MINIMUM_JAVA_MAJOR;
 }
 
 /**
- * Ask jenv for its configured java home. jenv's own commands are async; we run
- * them synchronously enough by reading stdout and blocking on exit is not
- * possible in Nova, so this is best-effort using a short-lived probe file that
- * jenv writes. In practice we shell out and read a cached value.
+ * The JDK jenv would select, read from its files rather than its CLI.
+ *
+ * `jenv javahome` would answer directly, but Nova cannot run a process
+ * synchronously and this resolution has to be. Reading the version file and
+ * resolving it against `versions/` is what the CLI does anyway.
  */
 function findJavaHomeViaJenv(): string | null {
-  // `jenv javahome` prints an absolute path. We can't block on a Process in
-  // Nova, so we read jenv's version file and resolve it against its versions
-  // directory — this avoids the async round-trip entirely.
   const jenvRoot = nova.environment["JENV_ROOT"] ??
     nova.path.join(nova.path.expanduser("~"), ".jenv");
   const versionFiles = [

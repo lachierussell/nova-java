@@ -48,6 +48,15 @@ describe("revealLocation", () => {
     expect(editor.text).toBe("package java.lang;\nclass String {}\n");
   });
 
+  it("creates the storage directory when it does not exist yet", async () => {
+    nova.fs.remove("/Users/tester/storage");
+    setRevealClient(fakeClient({ "java/classFileContents": "class A {}\n" }) as never);
+
+    await revealLocation({ uri: "jdt://contents/x/A.class", range });
+
+    expect(nova.workspace.activeTextEditor!.text).toBe("class A {}\n");
+  });
+
   it("reuses one file per jdt: uri, so repeated jumps do not pile up tabs", async () => {
     const uri = "jdt://contents/rt.jar/java.lang/String.class?=proj";
     setRevealClient(fakeClient({ "java/classFileContents": "class String {}\n" }) as never);

@@ -25,8 +25,14 @@ export interface LspTextEdit {
   newText: string;
 }
 
-/** Precompute the starting offset of every line in `text`. */
-function lineStartOffsets(text: string): number[] {
+/**
+ * The starting offset of every line in `text`.
+ *
+ * Callers resolving more than one position — formatting a whole document is
+ * hundreds of edits — build this once and pass it to `positionToOffset`, so
+ * the text is walked once rather than once per position.
+ */
+export function lineStartOffsets(text: string): number[] {
   const starts = [0];
   for (let i = 0; i < text.length; i++) {
     if (text[i] === "\n") starts.push(i + 1);
@@ -60,7 +66,7 @@ export function lspPositionToOffset(text: string, pos: LspPosition): number {
   return positionToOffset(text, lineStartOffsets(text), pos);
 }
 
-function positionToOffset(
+export function positionToOffset(
   text: string,
   starts: number[],
   pos: LspPosition,
@@ -100,24 +106,6 @@ export function lspRangeToOffsets(
 /** Read a document's full text. */
 export function documentText(document: TextDocument): string {
   return document.getTextInRange(new Range(0, document.length));
-}
-
-export function rangeToLspRange(document: TextDocument, range: Range): LspRange {
-  const text = documentText(document);
-  return {
-    start: offsetToLspPosition(text, range.start),
-    end: offsetToLspPosition(text, range.end),
-  };
-}
-
-export function lspRangeToRange(document: TextDocument, range: LspRange): Range {
-  const { start, end } = lspRangeToOffsets(documentText(document), range);
-  return new Range(start, end);
-}
-
-/** LSP file URI for a Nova path. */
-export function pathToUri(path: string): string {
-  return `file://${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 export function uriToPath(uri: string): string {

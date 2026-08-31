@@ -351,4 +351,16 @@ describe("symbols sidebar tracking", () => {
     await flush(250);
     expect(client.requests.length).toBeGreaterThan(before);
   });
+
+  it("drops an editor's listeners when it closes", async () => {
+    await activateReady();
+    const editor = nova.openEditor("/Users/tester/project/A.java", "class A {}\n");
+    await flush(250);
+
+    editor.onDidDestroyEmitter.emit(editor);
+    await flush(250);
+
+    expect(editor.onDidChangeSelectionEmitter.count).toBe(0);
+    expect(editor.onWillSaveEmitter.count).toBe(0);
+  });
 });

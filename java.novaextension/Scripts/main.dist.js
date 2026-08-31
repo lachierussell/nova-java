@@ -14,7 +14,6 @@ const config = {
   /** Logs LSP traffic to the Extension Console (Nova 10+ `debug` option). */
   logServerTrace: "java.debug.logServerTrace",
   inlayParameterNames: "java.inlayHints.parameterNames",
-  inlayVariableTypes: "java.inlayHints.variableTypes",
   // Workspace-specific project settings.
   projectRoot: "java.project.root",
   gradleWrapperPath: "java.gradle.wrapperPath",
@@ -31,8 +30,7 @@ function getConfig(key) {
 }
 function getOverridableBoolean(key) {
   const workspace = nova.workspace?.config.get(key);
-  if (workspace === true || workspace === "Enable") return true;
-  if (workspace === false || workspace === "Disable") return false;
+  if (typeof workspace === "boolean") return workspace;
   return nova.config.get(key, "boolean") ?? false;
 }
 function post(kind, message, detail) {
@@ -63,11 +61,34 @@ function wrapCommand(command) {
 function fileExists(path) {
   return nova.fs.access(path, nova.fs.F_OK);
 }
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 function expandPath(path) {
   if (path.startsWith("~/")) {
     return nova.path.join(nova.path.expanduser("~"), path.slice(2));
   }
   return path;
+}
+function mkdirRecursive(path) {
+  let current = "";
+  for (const part of path.split("/").filter((p) => p.length > 0)) {
+    current += `/${part}`;
+    if (nova.fs.access(current, nova.fs.F_OK)) continue;
+    try {
+      nova.fs.mkdir(current);
+    } catch (err) {
+      console.error(`Could not create "${current}":`, String(err));
+      return;
+    }
+  }
+}
+function hashString(value) {
+  let hash = 5381;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash << 5) + hash + value.charCodeAt(i) | 0;
+  }
+  return (hash >>> 0).toString(36);
 }
 function promptInput(message, options = {}) {
   return new Promise((resolve) => {
@@ -125,8 +146,16 @@ function findJavaHome() {
   }
   return null;
 }
+function javaMajorForHome(home) {
+  const parts = home.split("/").filter((p) => p.length > 0).reverse();
+  for (const part of parts) {
+    const major = parseJavaMajor(part);
+    if (major != null) return major;
+  }
+  return null;
+}
 function javaHomeIsUsable(home) {
-  const major = parseJavaMajor(nova.path.basename(home));
+  const major = javaMajorForHome(home);
   return major == null || major >= MINIMUM_JAVA_MAJOR;
 }
 function findJavaHomeViaJenv() {
@@ -272,6 +301,67 @@ function isDirectory(path) {
     return false;
   }
 }
+const JDTLS_MARKER = "org.eclipse.jdt.ls.core.id1";
+const TERM_GRACE_MS = 3e3;
+const POLL_MS = 250;
+async function reapOrphanedServers(dataDir) {
+  let pids = await findServerPids(dataDir);
+  if (pids.length === 0) return;
+  console.warn(
+    `Found ${pids.length} orphaned Java language server process(es) holding "${dataDir}": ${pids.join(", ")}. Terminating before restart.`
+  );
+  await signal("TERM", pids);
+  for (let waited = 0; waited < TERM_GRACE_MS; waited += POLL_MS) {
+    await delay(POLL_MS);
+    pids = await findServerPids(dataDir);
+    if (pids.length === 0) return;
+  }
+  console.warn(`Orphans ${pids.join(", ")} ignored SIGTERM; sending SIGKILL.`);
+  await signal("KILL", pids);
+  await delay(POLL_MS);
+  const survivors = await findServerPids(dataDir);
+  if (survivors.length > 0) {
+    console.error(
+      `Could not terminate Java language server process(es): ${survivors.join(", ")}.`
+    );
+  }
+}
+async function findServerPids(dataDir) {
+  const output = await runCommand("/bin/ps", ["-Ao", "pid=,command="]);
+  const pids = [];
+  for (const line of output.split("\n")) {
+    if (!line.includes(JDTLS_MARKER)) continue;
+    if (!line.includes(`-data ${dataDir}`)) continue;
+    const pid = line.trim().split(/\s+/)[0];
+    if (/^\d+$/.test(pid)) pids.push(pid);
+  }
+  return pids;
+}
+async function signal(name, pids) {
+  try {
+    await runCommand("/bin/kill", [`-${name}`, ...pids]);
+  } catch (err) {
+    console.log(`kill -${name} ${pids.join(" ")}: ${String(err)}`);
+  }
+}
+function runCommand(path, args) {
+  return new Promise((resolve, reject) => {
+    let out = "";
+    try {
+      const process = new Process(path, {
+        args,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      process.onStdout((line) => {
+        out += line;
+      });
+      process.onDidExit(() => resolve(out));
+      process.start();
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+}
 function lineStartOffsets(text) {
   const starts = [0];
   for (let i = 0; i < text.length; i++) {
@@ -303,13 +393,6 @@ function positionToOffset(text, starts, pos) {
 }
 function newlineWidth(text, nextLineStart) {
   return text[nextLineStart - 2] === "\r" ? 2 : 1;
-}
-function lspRangeToOffsets(text, range) {
-  const starts = lineStartOffsets(text);
-  return {
-    start: positionToOffset(text, starts, range.start),
-    end: positionToOffset(text, starts, range.end)
-  };
 }
 function documentText(document) {
   return document.getTextInRange(new Range(0, document.length));
@@ -364,10 +447,7 @@ async function resolvePath(uri) {
 }
 function writeClassFile(uri, contents) {
   const dir = nova.path.join(nova.extension.globalStoragePath, "classfiles");
-  try {
-    if (!nova.fs.access(dir, nova.fs.F_OK)) nova.fs.mkdir(dir);
-  } catch {
-  }
+  mkdirRecursive(dir);
   const path = nova.path.join(dir, `${classFileName(uri)}.java`);
   try {
     const file = nova.fs.open(path, "w");
@@ -383,14 +463,7 @@ function classFileName(uri) {
   const decoded = decodeURIComponent(uri);
   const match = /([A-Za-z_$][A-Za-z0-9_$]*)\.class/.exec(decoded);
   const simpleName = match ? match[1] : "ClassFile";
-  return `${simpleName}-${hash(uri)}`;
-}
-function hash(value) {
-  let h = 5381;
-  for (let i = 0; i < value.length; i++) {
-    h = (h << 5) + h + value.charCodeAt(i) | 0;
-  }
-  return (h >>> 0).toString(36);
+  return `${simpleName}-${hashString(uri)}`;
 }
 const FLAVOR_NONE = "none";
 const FLAVOR_CUSTOM = "custom";
@@ -412,7 +485,6 @@ class JavaLanguageServer {
     this.client = null;
     this.listeners = [];
     this.generation = 0;
-    this.stoppingIntentionally = false;
     this.startedAt = 0;
     this.crashCount = 0;
     this.disposed = false;
@@ -477,7 +549,7 @@ class JavaLanguageServer {
     }
     this.warnIfJavaTooOld(javaHome);
     this.info.setJavaHome(javaHome);
-    const serverPath = flavor === FLAVOR_CUSTOM ? optionalExpand(getConfig(config.lspPath)) : findJdtls();
+    const serverPath = flavor === FLAVOR_CUSTOM ? expandOptional(getConfig(config.lspPath)) : findJdtls();
     if (!serverPath) {
       this.info.setStatus("failed");
       notify.error(
@@ -501,7 +573,7 @@ class JavaLanguageServer {
       projectRoot,
       dataDir
     );
-    const clientOptions = this.buildClientOptions(javaHome, projectRoot);
+    const clientOptions = this.buildClientOptions(projectRoot);
     console.log(
       `[lsp] launching ${serverOptions.path} ${JSON.stringify(serverOptions.args)}`
     );
@@ -627,19 +699,16 @@ class JavaLanguageServer {
     this.ready = false;
     setRevealClient(null);
     if (client2) {
-      this.stoppingIntentionally = true;
       try {
         client2.stop();
       } catch (err) {
         console.error("Error stopping the Java language server:", String(err));
-      } finally {
-        this.stoppingIntentionally = false;
       }
     }
     this.info.setStatus("stopped");
   }
   warnIfJavaTooOld(javaHome) {
-    const major = parseJavaMajor(nova.path.basename(javaHome));
+    const major = javaMajorForHome(javaHome);
     if (major != null && major < MINIMUM_JAVA_MAJOR) {
       notify.warn(
         `Java ${major} is too old for the language server`,
@@ -653,8 +722,7 @@ class JavaLanguageServer {
    * doesn't spin forever.
    */
   handleDidStop(client2, err) {
-    if (this.client !== client2) return;
-    if (this.stoppingIntentionally || this.disposed) return;
+    if (this.client !== client2 || this.disposed) return;
     this.client = null;
     this.ready = false;
     setRevealClient(null);
@@ -688,7 +756,7 @@ class JavaLanguageServer {
     const dir = nova.path.join(
       nova.extension.globalStoragePath,
       "workspaces",
-      `${nova.path.basename(projectRoot)}-${hashPath(projectRoot)}`
+      `${nova.path.basename(projectRoot)}-${hashString(projectRoot)}`
     );
     mkdirRecursive(dir);
     return dir;
@@ -799,12 +867,6 @@ class JavaLanguageServer {
       const url = getConfig(config.formatSettingsUrl);
       return url ? { url: expandPath(url) } : {};
     }
-    if (style === "palantir") {
-      console.warn(
-        "Palantir formatting is only available with the Spotless formatter; the language server will use its default style."
-      );
-      return {};
-    }
     const profile = FORMATTER_PROFILES[style];
     return profile ? { url: profile.url, profile: profile.profile } : {};
   }
@@ -819,7 +881,7 @@ class JavaLanguageServer {
     if (libraries?.length) settings.referencedLibraries = libraries;
     return settings;
   }
-  buildClientOptions(_javaHome, projectRoot) {
+  buildClientOptions(projectRoot) {
     return {
       syntaxes: ["java"],
       // Nova 10+: mirrors the LSP conversation into the Extension Console.
@@ -848,69 +910,6 @@ function summarise(params) {
   }
   return text.length > 300 ? `${text.slice(0, 300)}…` : text;
 }
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-const JDTLS_MARKER = "org.eclipse.jdt.ls.core.id1";
-async function reapOrphanedServers(dataDir) {
-  let pids = await findServerPids(dataDir);
-  if (pids.length === 0) return;
-  console.warn(
-    `Found ${pids.length} orphaned Java language server process(es) holding "${dataDir}": ${pids.join(", ")}. Terminating before restart.`
-  );
-  await signal("TERM", pids);
-  for (let attempt = 0; attempt < 12; attempt++) {
-    await delay(250);
-    pids = await findServerPids(dataDir);
-    if (pids.length === 0) return;
-  }
-  console.warn(`Orphans ${pids.join(", ")} ignored SIGTERM; sending SIGKILL.`);
-  await signal("KILL", pids);
-  await delay(250);
-  const survivors = await findServerPids(dataDir);
-  if (survivors.length > 0) {
-    console.error(
-      `Could not terminate Java language server process(es): ${survivors.join(", ")}.`
-    );
-  }
-}
-async function findServerPids(dataDir) {
-  const output = await runCommand("/bin/ps", ["-Ao", "pid=,command="]);
-  const pids = [];
-  for (const line of output.split("\n")) {
-    if (!line.includes(JDTLS_MARKER)) continue;
-    if (!line.includes(`-data ${dataDir}`)) continue;
-    const pid = line.trim().split(/\s+/)[0];
-    if (/^\d+$/.test(pid)) pids.push(pid);
-  }
-  return pids;
-}
-async function signal(name, pids) {
-  if (pids.length === 0) return;
-  try {
-    await runCommand("/bin/kill", [`-${name}`, ...pids]);
-  } catch (err) {
-    console.log(`kill -${name} ${pids.join(" ")}: ${String(err)}`);
-  }
-}
-function runCommand(path, args) {
-  return new Promise((resolve, reject) => {
-    let out = "";
-    try {
-      const process = new Process(path, {
-        args,
-        stdio: ["ignore", "pipe", "ignore"]
-      });
-      process.onStdout((line) => {
-        out += line;
-      });
-      process.onDidExit(() => resolve(out));
-      process.start();
-    } catch (err) {
-      reject(err instanceof Error ? err : new Error(String(err)));
-    }
-  });
-}
 function resolveSection(settings, section) {
   if (!section) return settings;
   let current = settings;
@@ -920,32 +919,11 @@ function resolveSection(settings, section) {
   }
   return current ?? null;
 }
-function mkdirRecursive(path) {
-  const parts = path.split("/").filter((p) => p.length > 0);
-  let current = "";
-  for (const part of parts) {
-    current += `/${part}`;
-    if (nova.fs.access(current, nova.fs.F_OK)) continue;
-    try {
-      nova.fs.mkdir(current);
-    } catch (err) {
-      console.error(`Could not create "${current}":`, String(err));
-      return;
-    }
-  }
-}
-function optionalExpand(path) {
+function expandOptional(path) {
   return path ? expandPath(path) : null;
 }
 function shellQuote(value) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-function hashPath(path) {
-  let hash2 = 5381;
-  for (let i = 0; i < path.length; i++) {
-    hash2 = (hash2 << 5) + hash2 + path.charCodeAt(i) | 0;
-  }
-  return (hash2 >>> 0).toString(36);
 }
 const STATUS_IMAGES = {
   stopped: "status-stopped",
@@ -1056,7 +1034,7 @@ class ReferencesView {
     return null;
   }
   getTreeItem(element) {
-    const path = decodeURIComponent(element.uri.replace(/^file:\/\//, ""));
+    const path = uriToPath(element.uri);
     const item = new TreeItem(
       nova.path.basename(path),
       TreeItemCollapsibleState.None
@@ -1197,9 +1175,11 @@ function toNodes(result, uri) {
   return result.map(convert);
 }
 function planTextEdits(text, edits) {
+  const starts = lineStartOffsets(text);
   const planned = [];
   for (const edit of edits) {
-    const { start, end } = lspRangeToOffsets(text, edit.range);
+    const start = positionToOffset(text, starts, edit.range.start);
+    const end = positionToOffset(text, starts, edit.range.end);
     if (start < 0 || end > text.length || start > end) return null;
     planned.push({ start, end, newText: edit.newText });
   }
@@ -1282,7 +1262,22 @@ async function goToLocation(client2, editor, method, label) {
     await revealLocation(locations[0]);
     return;
   }
-  await pickLocation(locations, label);
+  const chosen = await choose(locations, locationLabel, label);
+  if (chosen) await revealLocation(chosen);
+}
+function choose(items, label, placeholder) {
+  return new Promise((resolve) => {
+    nova.workspace.showChoicePalette(
+      items.map(label),
+      { placeholder },
+      (_selection, index) => {
+        resolve(index != null && index >= 0 ? items[index] : null);
+      }
+    );
+  });
+}
+function locationLabel(loc) {
+  return `${nova.path.basename(uriToPath(loc.uri))}:${loc.range.start.line + 1}`;
 }
 function goToDefinition(client2, editor) {
   return goToLocation(client2, editor, "textDocument/definition", "Definition");
@@ -1302,21 +1297,6 @@ function goToImplementation(client2, editor) {
     "textDocument/implementation",
     "Implementation"
   );
-}
-async function pickLocation(locations, placeholder) {
-  const labels = locations.map((loc) => {
-    const path = decodeURIComponent(loc.uri.replace(/^file:\/\//, ""));
-    return `${nova.path.basename(path)}:${loc.range.start.line + 1}`;
-  });
-  return new Promise((resolve) => {
-    nova.workspace.showChoicePalette(labels, { placeholder }, (_sel, index) => {
-      if (index != null && index >= 0) {
-        void revealLocation(locations[index]).then(resolve);
-      } else {
-        resolve();
-      }
-    });
-  });
 }
 async function findReferences(client2, editor, view) {
   const params = {
@@ -1422,19 +1402,8 @@ async function codeActions(client2, editor) {
     notify.info("No code actions available here.");
     return;
   }
-  await new Promise((resolve) => {
-    nova.workspace.showChoicePalette(
-      list.map((a) => a.title),
-      { placeholder: "Java Code Actions" },
-      (_sel, index) => {
-        if (index != null && index >= 0) {
-          void runCodeAction(client2, list[index]).then(resolve);
-        } else {
-          resolve();
-        }
-      }
-    );
-  });
+  const chosen = await choose(list, (a) => a.title, "Java Code Actions");
+  if (chosen) await runCodeAction(client2, chosen);
 }
 async function runCodeAction(client2, action) {
   if (action.edit) await applyWorkspaceEdit(action.edit);
@@ -1458,22 +1427,12 @@ async function findWorkspaceSymbol(client2) {
     notify.info("No symbols found.");
     return;
   }
-  const labels = symbols.map(
-    (symbol) => symbol.containerName ? `${symbol.name} — ${symbol.containerName}` : symbol.name
+  const chosen = await choose(
+    symbols,
+    (symbol) => symbol.containerName ? `${symbol.name} — ${symbol.containerName}` : symbol.name,
+    "Find Symbol"
   );
-  return new Promise((resolve) => {
-    nova.workspace.showChoicePalette(
-      labels,
-      { placeholder: "Find Symbol" },
-      (_sel, index) => {
-        if (index != null && index >= 0) {
-          void revealLocation(symbols[index].location).then(resolve);
-        } else {
-          resolve();
-        }
-      }
-    );
-  });
+  if (chosen) await revealLocation(chosen.location);
 }
 async function formatDocument(client2, editor) {
   const formatter = getConfig(config.formatter) ?? "lsp";
@@ -1482,13 +1441,6 @@ async function formatDocument(client2, editor) {
   } else {
     await formatDocumentLsp(client2, editor);
   }
-}
-function spotlessArgs(gradlew, gradleRoot, projectRoot, offline) {
-  const args = ["bash", gradlew];
-  if (projectRoot !== gradleRoot) args.push("-p", projectRoot);
-  if (offline) args.push("--offline");
-  args.push("spotlessApply");
-  return args;
 }
 function formatWithSpotless(editor) {
   if (!nova.workspace.path) {
@@ -1511,12 +1463,10 @@ function formatWithSpotless(editor) {
   }
   const relative = nova.path.relative(gradleRoot, documentPath);
   console.log(`Formatting ${relative} with Spotless…`);
-  const args = spotlessArgs(
-    gradlew,
-    gradleRoot,
-    projectRoot,
-    getConfig(config.spotlessOffline) === true
-  );
+  const args = ["bash", gradlew];
+  if (projectRoot !== gradleRoot) args.push("-p", projectRoot);
+  if (getConfig(config.spotlessOffline) === true) args.push("--offline");
+  args.push("spotlessApply");
   return new Promise((resolve, reject) => {
     const process = new Process("/usr/bin/env", {
       args,
@@ -1557,12 +1507,9 @@ function activate() {
   disposables.add(symbolsView.treeView);
   server = new JavaLanguageServer(infoView);
   server.onDidBecomeReady = () => symbolsView?.refresh(true);
-  logResolvedConfig();
   registerCommands();
-  registerSaveListeners();
-  registerSymbolTracking();
+  registerEditorHooks();
   registerConfigReload();
-  registerEventLogging();
   void server.start();
   console.log("Java extension activated.");
 }
@@ -1623,88 +1570,50 @@ function registerCommands() {
   reg("java.preferences", () => nova.workspace.openConfig());
   reg("java.extensionPreferences", () => nova.openConfig());
 }
-function registerSymbolTracking() {
-  const view = symbolsView;
-  disposables.add(view.treeView.onDidChangeVisibility(() => view.refresh()));
+function registerEditorHooks() {
+  const symbols = symbolsView;
+  disposables.add(symbols.treeView.onDidChangeVisibility(() => symbols.refresh()));
   disposables.add(
     nova.workspace.onDidAddTextEditor((editor) => {
-      view.refresh();
-      disposables.add(editor.onDidChangeSelection(() => view.refresh()));
-      disposables.add(editor.onDidStopChanging(() => view.refresh(true)));
-      disposables.add(editor.onDidSave(() => view.refresh(true)));
-      disposables.add(editor.onDidDestroy(() => view.refresh(true)));
+      warnAboutSyntax(editor.document);
+      symbols.refresh();
+      const perEditor = new CompositeDisposable();
+      perEditor.add(editor.onDidChangeSelection(() => symbols.refresh()));
+      perEditor.add(editor.onDidStopChanging(() => symbols.refresh(true)));
+      perEditor.add(editor.onDidSave(() => symbols.refresh(true)));
+      perEditor.add(editor.onWillSave((ed) => runSaveActions(ed)));
+      perEditor.add(
+        editor.onDidDestroy(() => {
+          symbols.refresh(true);
+          perEditor.dispose();
+        })
+      );
+      disposables.add(perEditor);
     })
   );
 }
-function registerSaveListeners() {
-  disposables.add(
-    nova.workspace.onDidAddTextEditor((editor) => {
-      const willSave = editor.onWillSave(async (ed) => {
-        if (ed.document.syntax !== "java") return;
-        const client2 = server?.languageClient;
-        if (!client2) return;
-        try {
-          let organized = false;
-          if (getOverridableBoolean(config.organizeImportsOnSave)) {
-            await organizeImports(client2, ed);
-            organized = true;
-          }
-          if (getOverridableBoolean(config.formatOnSave)) {
-            if (organized) await settle();
-            await formatDocument(client2, ed);
-          }
-        } catch (err) {
-          console.error("Java format-on-save failed:", String(err));
-        }
-      });
-      disposables.add(willSave);
-    })
+function warnAboutSyntax(doc) {
+  if (!doc.path?.endsWith(".java") || doc.syntax === "java") return;
+  console.error(
+    `${nova.path.basename(doc.path)} is a .java file but Nova reports syntax=${JSON.stringify(doc.syntax)}. The language client is bound to "java", so Nova will not send hover or completion for this editor.`
   );
 }
-function settle() {
-  return new Promise((resolve) => setTimeout(resolve, 150));
-}
-function registerEventLogging() {
-  const describe = (doc) => `${doc.path ? nova.path.basename(doc.path) : "(untitled)"} syntax=${JSON.stringify(doc.syntax)}`;
-  console.log(
-    `[events] workspace path=${JSON.stringify(nova.workspace.path)} openEditors=${nova.workspace.textEditors.length}`
-  );
-  disposables.add(
-    nova.workspace.onDidAddTextEditor((editor) => {
-      const doc = editor.document;
-      console.log(
-        `[events] editor opened: ${describe(doc)} isJava=${doc.syntax === "java"} uri=${doc.uri}`
-      );
-      if (doc.path?.endsWith(".java") && doc.syntax !== "java") {
-        console.error(
-          `[events] MISMATCH: ${nova.path.basename(doc.path)} is a .java file but Nova reports syntax=${JSON.stringify(doc.syntax)}. The language client is bound to "java", so Nova will not send hover or completion for this editor.`
-        );
-      }
-      disposables.add(
-        editor.onDidStopChanging(
-          (ed) => console.log(`[events] stopped changing: ${describe(ed.document)}`)
-        )
-      );
-      disposables.add(
-        editor.onDidSave(
-          (ed) => console.log(`[events] saved: ${describe(ed.document)}`)
-        )
-      );
-      disposables.add(
-        editor.onDidDestroy(
-          (ed) => console.log(`[events] editor closed: ${describe(ed.document)}`)
-        )
-      );
-    })
-  );
-}
-function logResolvedConfig() {
-  for (const key of Object.values(config)) {
-    const workspace = nova.workspace?.config.get(key) ?? null;
-    const global = nova.config.get(key) ?? null;
-    console.log(
-      `[config] ${key} = ${JSON.stringify(getConfig(key))} (workspace=${JSON.stringify(workspace)}, global=${JSON.stringify(global)})`
-    );
+async function runSaveActions(editor) {
+  if (editor.document.syntax !== "java") return;
+  const client2 = server?.languageClient;
+  if (!client2) return;
+  try {
+    let organized = false;
+    if (getOverridableBoolean(config.organizeImportsOnSave)) {
+      await organizeImports(client2, editor);
+      organized = true;
+    }
+    if (getOverridableBoolean(config.formatOnSave)) {
+      if (organized) await delay(150);
+      await formatDocument(client2, editor);
+    }
+  } catch (err) {
+    console.error("Java format-on-save failed:", String(err));
   }
 }
 function watchConfig(key, onChange) {

@@ -1,7 +1,7 @@
 /**
  * Sidebar tree listing the results of "Find References".
  */
-import { LspLocation } from "../lspNovaConversions";
+import { LspLocation, uriToPath } from "../lspNovaConversions";
 import { revealLocation } from "../reveal";
 
 export class ReferencesView implements TreeDataProvider<LspLocation> {
@@ -40,7 +40,7 @@ export class ReferencesView implements TreeDataProvider<LspLocation> {
   }
 
   getTreeItem(element: LspLocation): TreeItem {
-    const path = decodeURIComponent(element.uri.replace(/^file:\/\//, ""));
+    const path = uriToPath(element.uri);
     const item = new TreeItem(
       nova.path.basename(path),
       TreeItemCollapsibleState.None,

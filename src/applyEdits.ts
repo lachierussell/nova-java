@@ -1,8 +1,8 @@
 import {
-  LspRange,
   LspTextEdit,
   documentText,
-  lspRangeToOffsets,
+  lineStartOffsets,
+  positionToOffset,
 } from "./lspNovaConversions";
 
 interface TextDocumentEdit {
@@ -16,7 +16,7 @@ export interface WorkspaceEdit {
 }
 
 /** A resolved edit: flat character offsets into the snapshot, plus replacement. */
-export interface PlannedEdit {
+interface PlannedEdit {
   start: number;
   end: number;
   newText: string;
@@ -36,13 +36,15 @@ export interface PlannedEdit {
  * overlapping ranges, or ranges outside the document. That means our text and
  * the server's have diverged, and applying them would corrupt the file.
  */
-export function planTextEdits(
+function planTextEdits(
   text: string,
   edits: readonly LspTextEdit[],
 ): PlannedEdit[] | null {
+  const starts = lineStartOffsets(text);
   const planned: PlannedEdit[] = [];
   for (const edit of edits) {
-    const { start, end } = lspRangeToOffsets(text, edit.range);
+    const start = positionToOffset(text, starts, edit.range.start);
+    const end = positionToOffset(text, starts, edit.range.end);
     // Out of bounds means the server was formatting a different revision of
     // the document than the one we hold.
     if (start < 0 || end > text.length || start > end) return null;
@@ -59,18 +61,6 @@ export function planTextEdits(
   }
 
   return planned;
-}
-
-/**
- * Apply the plan to a string. Used to verify a plan in tests, and mirrors
- * exactly what `applyTextEdits` asks the editor to do.
- */
-export function applyPlanToText(text: string, plan: readonly PlannedEdit[]): string {
-  let out = text;
-  for (const e of plan) {
-    out = out.slice(0, e.start) + e.newText + out.slice(e.end);
-  }
-  return out;
 }
 
 /**
@@ -142,5 +132,3 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit): Promise<void> {
     await applyTextEdits(editor, edits);
   }
 }
-
-export type { LspRange };

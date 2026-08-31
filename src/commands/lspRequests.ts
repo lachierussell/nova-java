@@ -4,6 +4,7 @@ import {
   LspTextEdit,
   documentText,
   offsetToLspPosition,
+  uriToPath,
 } from "../lspNovaConversions";
 import {
   applyTextEdits,
@@ -65,7 +66,33 @@ async function goToLocation(
     await revealLocation(locations[0]);
     return;
   }
-  await pickLocation(locations, label);
+  const chosen = await choose(locations, locationLabel, label);
+  if (chosen) await revealLocation(chosen);
+}
+
+/**
+ * Show a choice palette and resolve with the chosen item, or null if the user
+ * dismissed it.
+ */
+function choose<T>(
+  items: readonly T[],
+  label: (item: T) => string,
+  placeholder: string,
+): Promise<T | null> {
+  return new Promise((resolve) => {
+    nova.workspace.showChoicePalette(
+      items.map(label),
+      { placeholder },
+      (_selection, index) => {
+        resolve(index != null && index >= 0 ? items[index] : null);
+      },
+    );
+  });
+}
+
+/** "A.java:42" — enough to tell two results apart in a palette. */
+function locationLabel(loc: LspLocation): string {
+  return `${nova.path.basename(uriToPath(loc.uri))}:${loc.range.start.line + 1}`;
 }
 
 export function goToDefinition(
@@ -97,25 +124,6 @@ export function goToImplementation(
     "textDocument/implementation",
     "Implementation",
   );
-}
-
-async function pickLocation(
-  locations: LspLocation[],
-  placeholder: string,
-): Promise<void> {
-  const labels = locations.map((loc) => {
-    const path = decodeURIComponent(loc.uri.replace(/^file:\/\//, ""));
-    return `${nova.path.basename(path)}:${loc.range.start.line + 1}`;
-  });
-  return new Promise((resolve) => {
-    nova.workspace.showChoicePalette(labels, { placeholder }, (_sel, index) => {
-      if (index != null && index >= 0) {
-        void revealLocation(locations[index]).then(resolve);
-      } else {
-        resolve();
-      }
-    });
-  });
 }
 
 export async function findReferences(
@@ -275,19 +283,8 @@ export async function codeActions(
     notify.info("No code actions available here.");
     return;
   }
-  await new Promise<void>((resolve) => {
-    nova.workspace.showChoicePalette(
-      list.map((a) => a.title),
-      { placeholder: "Java Code Actions" },
-      (_sel, index) => {
-        if (index != null && index >= 0) {
-          void runCodeAction(client, list[index]).then(resolve);
-        } else {
-          resolve();
-        }
-      },
-    );
-  });
+  const chosen = await choose(list, (a) => a.title, "Java Code Actions");
+  if (chosen) await runCodeAction(client, chosen);
 }
 
 async function runCodeAction(
@@ -320,22 +317,13 @@ export async function findWorkspaceSymbol(
   }
   // The sidebar tracks the active file, so workspace-wide hits are offered as
   // a palette to jump from rather than parked in a view.
-  const labels = symbols.map((symbol) =>
-    symbol.containerName ? `${symbol.name} — ${symbol.containerName}` : symbol.name,
+  const chosen = await choose(
+    symbols,
+    (symbol) =>
+      symbol.containerName ? `${symbol.name} — ${symbol.containerName}` : symbol.name,
+    "Find Symbol",
   );
-  return new Promise((resolve) => {
-    nova.workspace.showChoicePalette(
-      labels,
-      { placeholder: "Find Symbol" },
-      (_sel, index) => {
-        if (index != null && index >= 0) {
-          void revealLocation(symbols[index].location).then(resolve);
-        } else {
-          resolve();
-        }
-      },
-    );
-  });
+  if (chosen) await revealLocation(chosen.location);
 }
 
 interface WorkspaceSymbol {

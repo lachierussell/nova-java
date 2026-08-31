@@ -5,6 +5,7 @@ import {
   uriToPath,
 } from "./lspNovaConversions";
 import { notify } from "./notify";
+import { hashString, mkdirRecursive } from "./novaUtils";
 
 /**
  * The live client, supplied by main.ts.
@@ -80,11 +81,7 @@ async function resolvePath(uri: string): Promise<string | null> {
  */
 function writeClassFile(uri: string, contents: string): string | null {
   const dir = nova.path.join(nova.extension.globalStoragePath, "classfiles");
-  try {
-    if (!nova.fs.access(dir, nova.fs.F_OK)) nova.fs.mkdir(dir);
-  } catch {
-    // Racing with ourselves is fine; a real failure surfaces on open below.
-  }
+  mkdirRecursive(dir);
 
   const path = nova.path.join(dir, `${classFileName(uri)}.java`);
   try {
@@ -104,13 +101,5 @@ function classFileName(uri: string): string {
   // e.g. …?=project/…&lt;java.lang(String.class → "String"
   const match = /([A-Za-z_$][A-Za-z0-9_$]*)\.class/.exec(decoded);
   const simpleName = match ? match[1] : "ClassFile";
-  return `${simpleName}-${hash(uri)}`;
-}
-
-function hash(value: string): string {
-  let h = 5381;
-  for (let i = 0; i < value.length; i++) {
-    h = ((h << 5) + h + value.charCodeAt(i)) | 0;
-  }
-  return (h >>> 0).toString(36);
+  return `${simpleName}-${hashString(uri)}`;
 }

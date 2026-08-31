@@ -19,27 +19,6 @@ export async function formatDocument(
   }
 }
 
-/**
- * The `env` argv for a Spotless run.
- *
- * The wrapper must run from the directory that owns it, so `-p` is what points
- * Gradle at the module being formatted when that is a subfolder. `--offline`
- * matters on a machine with no network: without it Gradle stalls for minutes
- * trying to reach the plugin portal, and a format-on-save appears to hang.
- */
-export function spotlessArgs(
-  gradlew: string,
-  gradleRoot: string,
-  projectRoot: string,
-  offline: boolean,
-): string[] {
-  const args = ["bash", gradlew];
-  if (projectRoot !== gradleRoot) args.push("-p", projectRoot);
-  if (offline) args.push("--offline");
-  args.push("spotlessApply");
-  return args;
-}
-
 function formatWithSpotless(editor: TextEditor): Promise<void> {
   if (!nova.workspace.path) {
     notify.error("Cannot run Spotless", "No workspace is open.");
@@ -70,12 +49,12 @@ function formatWithSpotless(editor: TextEditor): Promise<void> {
   const relative = nova.path.relative(gradleRoot, documentPath);
   console.log(`Formatting ${relative} with Spotless…`);
 
-  const args = spotlessArgs(
-    gradlew,
-    gradleRoot,
-    projectRoot,
-    getConfig<boolean>(config.spotlessOffline) === true,
-  );
+  const args = ["bash", gradlew];
+  if (projectRoot !== gradleRoot) args.push("-p", projectRoot);
+  // Without --offline, a machine with no network stalls for minutes trying to
+  // reach the plugin portal, and a format-on-save appears to hang.
+  if (getConfig<boolean>(config.spotlessOffline) === true) args.push("--offline");
+  args.push("spotlessApply");
 
   return new Promise<void>((resolve, reject) => {
     const process = new Process("/usr/bin/env", {

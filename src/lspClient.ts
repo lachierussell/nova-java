@@ -11,9 +11,10 @@ import {
   findJdtlsConfigPath,
   findProjectRoot,
   findPython,
-  parseJavaMajor,
+  javaMajorForHome,
 } from "./paths";
-import { expandPath } from "./novaUtils";
+import { delay, expandPath, hashString, mkdirRecursive } from "./novaUtils";
+import { reapOrphanedServers } from "./reapServers";
 import { notify } from "./notify";
 import { setRevealClient } from "./reveal";
 import { InformationView } from "./sidebar/informationView";
@@ -36,13 +37,6 @@ const MAX_CRASH_RESTARTS = 4;
  * what actually guarantees the lock is free before the next launch.
  */
 const RESTART_SETTLE_MS = 1000;
-
-/**
- * Escape hatch for forcing LSP tracing on regardless of preferences, for when
- * a settings-gated trace is itself the thing that won't switch on. Normally
- * `java.debug.logServerTrace` governs.
- */
-const FORCE_TRACE = false;
 
 /** Eclipse formatter profiles we can point JDT.LS at for the style presets. */
 const FORMATTER_PROFILES: Record<string, { url: string; profile: string }> = {
@@ -69,8 +63,6 @@ export class JavaLanguageServer {
    */
   private generation = 0;
 
-  /** True while we are deliberately stopping, so `onDidStop` isn't a crash. */
-  private stoppingIntentionally = false;
   private startedAt = 0;
   private crashCount = 0;
   private crashTimer: ReturnType<typeof setTimeout> | undefined;
@@ -174,7 +166,7 @@ export class JavaLanguageServer {
 
     const serverPath =
       flavor === FLAVOR_CUSTOM
-        ? optionalExpand(getConfig<string>(config.lspPath))
+        ? expandOptional(getConfig<string>(config.lspPath))
         : findJdtls();
     if (!serverPath) {
       this.info.setStatus("failed");
@@ -206,7 +198,7 @@ export class JavaLanguageServer {
       projectRoot,
       dataDir,
     );
-    const clientOptions = this.buildClientOptions(javaHome, projectRoot);
+    const clientOptions = this.buildClientOptions(projectRoot);
     console.log(
       `[lsp] launching ${serverOptions.path} ${JSON.stringify(serverOptions.args)}`,
     );
@@ -359,20 +351,17 @@ export class JavaLanguageServer {
     this.ready = false;
     setRevealClient(null);
     if (client) {
-      this.stoppingIntentionally = true;
       try {
         client.stop();
       } catch (err) {
         console.error("Error stopping the Java language server:", String(err));
-      } finally {
-        this.stoppingIntentionally = false;
       }
     }
     this.info.setStatus("stopped");
   }
 
   private warnIfJavaTooOld(javaHome: string): void {
-    const major = parseJavaMajor(nova.path.basename(javaHome));
+    const major = javaMajorForHome(javaHome);
     if (major != null && major < MINIMUM_JAVA_MAJOR) {
       notify.warn(
         `Java ${major} is too old for the language server`,
@@ -387,8 +376,8 @@ export class JavaLanguageServer {
    * doesn't spin forever.
    */
   private handleDidStop(client: LanguageClient, err?: Error): void {
-    if (this.client !== client) return; // A stale client we already replaced.
-    if (this.stoppingIntentionally || this.disposed) return;
+    // A stale client we already stopped and replaced; not a crash.
+    if (this.client !== client || this.disposed) return;
 
     this.client = null;
     this.ready = false;
@@ -429,7 +418,7 @@ export class JavaLanguageServer {
     const dir = nova.path.join(
       nova.extension.globalStoragePath,
       "workspaces",
-      `${nova.path.basename(projectRoot)}-${hashPath(projectRoot)}`,
+      `${nova.path.basename(projectRoot)}-${hashString(projectRoot)}`,
     );
     mkdirRecursive(dir);
     return dir;
@@ -519,7 +508,7 @@ export class JavaLanguageServer {
     }
 
     const tracing =
-      FORCE_TRACE || getConfig<boolean>(config.logServerTrace) === true;
+      getConfig<boolean>(config.logServerTrace) === true;
     if (tracing) console.log(`Logging LSP traffic to ${dataDir}/lsp-*.log`);
     const log = tracing ? ` --log ${shellQuote(dataDir)}` : "";
 
@@ -572,15 +561,8 @@ export class JavaLanguageServer {
       const url = getConfig<string>(config.formatSettingsUrl);
       return url ? { url: expandPath(url) } : {};
     }
-    // Palantir is not an Eclipse profile — it is only reachable through the
-    // Spotless formatter, which is a separate setting.
-    if (style === "palantir") {
-      console.warn(
-        "Palantir formatting is only available with the Spotless formatter; " +
-          "the language server will use its default style.",
-      );
-      return {};
-    }
+    // "eclipse" and anything unrecognised fall through to the server's own
+    // default, which is the Eclipse built-in profile.
     const profile = FORMATTER_PROFILES[style];
     return profile ? { url: profile.url, profile: profile.profile } : {};
   }
@@ -601,10 +583,7 @@ export class JavaLanguageServer {
     return settings;
   }
 
-  private buildClientOptions(
-    _javaHome: string,
-    projectRoot: string,
-  ): {
+  private buildClientOptions(projectRoot: string): {
     syntaxes: string[];
     debug: boolean;
     initializationOptions: Record<string, unknown>;
@@ -614,7 +593,7 @@ export class JavaLanguageServer {
       // Nova 10+: mirrors the LSP conversation into the Extension Console.
       // Off by default because it is noisy and costs throughput, but it is the
       // only way to see why a request came back empty.
-      debug: FORCE_TRACE || getConfig<boolean>(config.logServerTrace) === true,
+      debug: getConfig<boolean>(config.logServerTrace) === true,
       initializationOptions: {
         workspaceFolders: [`file://${projectRoot}`],
         settings: this.buildJavaSettings(),
@@ -640,101 +619,6 @@ function summarise(params: unknown): string {
   return text.length > 300 ? `${text.slice(0, 300)}…` : text;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** The marker every JDT.LS JVM carries, whatever launcher started it. */
-const JDTLS_MARKER = "org.eclipse.jdt.ls.core.id1";
-
-/**
- * Kill any JDT.LS still running against `dataDir`.
- *
- * `client.stop()` asks the server to shut down over LSP, which a healthy
- * server honours and a wedged or mid-import one ignores — and Nova does not
- * escalate. The JVM then outlives its client, keeps the Eclipse workspace
- * lock, and every subsequent launch comes up unable to take it. Since the
- * launcher chain is all `exec`, the JVM is a single process we can signal
- * directly.
- *
- * Only processes matching *both* the JDT.LS marker and this exact data
- * directory are touched, so another project's server — or an unrelated JVM —
- * is never a candidate.
- */
-async function reapOrphanedServers(dataDir: string): Promise<void> {
-  let pids = await findServerPids(dataDir);
-  if (pids.length === 0) return;
-
-  console.warn(
-    `Found ${pids.length} orphaned Java language server process(es) holding ` +
-      `"${dataDir}": ${pids.join(", ")}. Terminating before restart.`,
-  );
-  await signal("TERM", pids);
-
-  // Give the JVM a moment to go down cleanly, then insist.
-  for (let attempt = 0; attempt < 12; attempt++) {
-    await delay(250);
-    pids = await findServerPids(dataDir);
-    if (pids.length === 0) return;
-  }
-
-  console.warn(`Orphans ${pids.join(", ")} ignored SIGTERM; sending SIGKILL.`);
-  await signal("KILL", pids);
-  await delay(250);
-
-  const survivors = await findServerPids(dataDir);
-  if (survivors.length > 0) {
-    console.error(
-      `Could not terminate Java language server process(es): ${survivors.join(", ")}.`,
-    );
-  }
-}
-
-/** PIDs of JDT.LS processes using `dataDir`. */
-async function findServerPids(dataDir: string): Promise<string[]> {
-  // One `ps` and match in JS: no shell, so nothing in the path can be
-  // interpreted as a pattern or an argument.
-  const output = await runCommand("/bin/ps", ["-Ao", "pid=,command="]);
-  const pids: string[] = [];
-  for (const line of output.split("\n")) {
-    if (!line.includes(JDTLS_MARKER)) continue;
-    if (!line.includes(`-data ${dataDir}`)) continue;
-    const pid = line.trim().split(/\s+/)[0];
-    if (/^\d+$/.test(pid)) pids.push(pid);
-  }
-  return pids;
-}
-
-async function signal(name: "TERM" | "KILL", pids: string[]): Promise<void> {
-  if (pids.length === 0) return;
-  try {
-    await runCommand("/bin/kill", [`-${name}`, ...pids]);
-  } catch (err) {
-    // A process that exited between listing and signalling is the common case.
-    console.log(`kill -${name} ${pids.join(" ")}: ${String(err)}`);
-  }
-}
-
-/** Run a command to completion and return its stdout. */
-function runCommand(path: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let out = "";
-    try {
-      const process = new Process(path, {
-        args,
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-      process.onStdout((line) => {
-        out += line;
-      });
-      process.onDidExit(() => resolve(out));
-      process.start();
-    } catch (err) {
-      reject(err instanceof Error ? err : new Error(String(err)));
-    }
-  });
-}
-
 /**
  * Look a dotted `section` up in a settings tree, the way an LSP client is
  * expected to answer `workspace/configuration`.
@@ -752,39 +636,11 @@ function resolveSection(
   return current ?? null;
 }
 
-/**
- * `nova.fs.mkdir` creates a single directory, so a nested path fails unless
- * every parent already exists. Walk down and create each level.
- */
-function mkdirRecursive(path: string): void {
-  const parts = path.split("/").filter((p) => p.length > 0);
-  let current = "";
-  for (const part of parts) {
-    current += `/${part}`;
-    if (nova.fs.access(current, nova.fs.F_OK)) continue;
-    try {
-      nova.fs.mkdir(current);
-    } catch (err) {
-      console.error(`Could not create "${current}":`, String(err));
-      return;
-    }
-  }
-}
-
-function optionalExpand(path: string | null): string | null {
+function expandOptional(path: string | null): string | null {
   return path ? expandPath(path) : null;
 }
 
 /** Wrap an argument in single quotes for `sh -c`. */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/** Short, stable hash of a path, used to key per-project data directories. */
-function hashPath(path: string): string {
-  let hash = 5381;
-  for (let i = 0; i < path.length; i++) {
-    hash = ((hash << 5) + hash + path.charCodeAt(i)) | 0;
-  }
-  return (hash >>> 0).toString(36);
 }

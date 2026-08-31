@@ -1,5 +1,5 @@
 import { config, getConfig, getOverridableBoolean } from "./config";
-import { wrapCommand } from "./novaUtils";
+import { delay, wrapCommand } from "./novaUtils";
 import { notify } from "./notify";
 import { JavaLanguageServer } from "./lspClient";
 import { InformationView } from "./sidebar/informationView";
@@ -31,12 +31,9 @@ export function activate(): void {
 
   server.onDidBecomeReady = () => symbolsView?.refresh(true);
 
-  logResolvedConfig();
   registerCommands();
-  registerSaveListeners();
-  registerSymbolTracking();
+  registerEditorHooks();
   registerConfigReload();
-  registerEventLogging();
 
   void server.start();
   console.log("Java extension activated.");
@@ -120,147 +117,95 @@ function registerCommands(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Symbols sidebar: follow the active editor, like Nova's built-in Symbols tab.
+// Per-editor hooks: the Symbols sidebar follows the active editor, and saves
+// can format / organize imports.
 // ---------------------------------------------------------------------------
 
 /**
- * Keep the Symbols section in step with what is on screen.
+ * Wire up everything that has to happen per open editor.
  *
- * Nova has no "active editor changed" event, so selection changes stand in for
- * it: whichever editor the user is working in is the one reporting them. Those
+ * The Symbols section keeps in step with what is on screen. Nova has no
+ * "active editor changed" event, so selection changes stand in for it:
+ * whichever editor the user is working in is the one reporting them. Those
  * refreshes are cheap — the view skips the request when the file it already
  * describes is still the active one — while edits and saves force a reload.
  */
-function registerSymbolTracking(): void {
-  const view = symbolsView!;
-  disposables.add(view.treeView.onDidChangeVisibility(() => view.refresh()));
+function registerEditorHooks(): void {
+  const symbols = symbolsView!;
+  disposables.add(symbols.treeView.onDidChangeVisibility(() => symbols.refresh()));
+
   disposables.add(
     nova.workspace.onDidAddTextEditor((editor) => {
-      view.refresh();
-      disposables.add(editor.onDidChangeSelection(() => view.refresh()));
-      disposables.add(editor.onDidStopChanging(() => view.refresh(true)));
-      disposables.add(editor.onDidSave(() => view.refresh(true)));
-      disposables.add(editor.onDidDestroy(() => view.refresh(true)));
+      warnAboutSyntax(editor.document);
+      symbols.refresh();
+
+      // Scoped to this editor so its listeners go away when it closes, rather
+      // than accumulating for the lifetime of the extension.
+      const perEditor = new CompositeDisposable();
+      perEditor.add(editor.onDidChangeSelection(() => symbols.refresh()));
+      perEditor.add(editor.onDidStopChanging(() => symbols.refresh(true)));
+      perEditor.add(editor.onDidSave(() => symbols.refresh(true)));
+      perEditor.add(editor.onWillSave((ed) => runSaveActions(ed)));
+      perEditor.add(
+        editor.onDidDestroy(() => {
+          symbols.refresh(true);
+          perEditor.dispose();
+        }),
+      );
+      disposables.add(perEditor);
     }),
   );
 }
 
-// ---------------------------------------------------------------------------
-// Save hooks: format / organize imports on save.
-// ---------------------------------------------------------------------------
-
-function registerSaveListeners(): void {
-  disposables.add(
-    nova.workspace.onDidAddTextEditor((editor) => {
-      const willSave = editor.onWillSave(async (ed) => {
-        if (ed.document.syntax !== "java") return;
-        const client = server?.languageClient;
-        if (!client) return;
-        // A failure here must never abort the save: Nova waits on the promise
-        // we return, and a rejection surfaces as "the file couldn't be saved".
-        // Formatting is best-effort, so swallow errors and just log them.
-        try {
-          let organized = false;
-          if (getOverridableBoolean(config.organizeImportsOnSave)) {
-            await lsp.organizeImports(client, ed);
-            organized = true;
-          }
-          if (getOverridableBoolean(config.formatOnSave)) {
-            // Give Nova a moment to push the organize-imports change to the
-            // server. Formatting is computed server-side against the document
-            // it last saw, so asking too soon returns edits whose positions
-            // describe the pre-organize text.
-            if (organized) await settle();
-            await formatDocument(client, ed);
-          }
-        } catch (err) {
-          console.error("Java format-on-save failed:", String(err));
-        }
-      });
-      disposables.add(willSave);
-    }),
+/**
+ * Nova routes hover and completion to a language client only for the syntaxes
+ * named in its `clientOptions.syntaxes` — here, exactly `"java"`. A `.java`
+ * file reported as anything else means the editor never sends the request at
+ * all, which from the outside is indistinguishable from a server that answered
+ * nothing. Worth saying so out loud.
+ */
+function warnAboutSyntax(doc: TextDocument): void {
+  if (!doc.path?.endsWith(".java") || doc.syntax === "java") return;
+  console.error(
+    `${nova.path.basename(doc.path)} is a .java file but Nova reports ` +
+      `syntax=${JSON.stringify(doc.syntax)}. The language client is bound to ` +
+      `"java", so Nova will not send hover or completion for this editor.`,
   );
 }
 
-/** Yield long enough for pending document changes to reach the server. */
-function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 150));
+/**
+ * Format and organize imports on save, if enabled.
+ *
+ * A failure here must never abort the save: Nova waits on the promise we
+ * return, and a rejection surfaces as "the file couldn't be saved". Formatting
+ * is best-effort, so errors are swallowed and logged.
+ */
+async function runSaveActions(editor: TextEditor): Promise<void> {
+  if (editor.document.syntax !== "java") return;
+  const client = server?.languageClient;
+  if (!client) return;
+  try {
+    let organized = false;
+    if (getOverridableBoolean(config.organizeImportsOnSave)) {
+      await lsp.organizeImports(client, editor);
+      organized = true;
+    }
+    if (getOverridableBoolean(config.formatOnSave)) {
+      // Give Nova a moment to push the organize-imports change to the server.
+      // Formatting is computed server-side against the document it last saw,
+      // so asking too soon returns edits whose positions describe the
+      // pre-organize text.
+      if (organized) await delay(150);
+      await formatDocument(client, editor);
+    }
+  } catch (err) {
+    console.error("Java format-on-save failed:", String(err));
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Restart the server when settings that change how it launches are edited.
 // ---------------------------------------------------------------------------
-
-/**
- * Log editor and document events to the Extension Console.
- *
- * The decisive fact is each document's `syntax`: Nova routes hover and
- * completion to a language client only for the syntaxes named in its
- * `clientOptions.syntaxes` — here, exactly `"java"`. A `.java` file reported as
- * anything else (or as null) means the editor never sends the request at all,
- * which from the outside is indistinguishable from a server that answered
- * nothing.
- *
- * Unconditional while we chase that: a preference-gated version of this
- * produced no output, and a diagnostic you have to switch on is a diagnostic
- * that doesn't run.
- */
-function registerEventLogging(): void {
-  const describe = (doc: TextDocument) =>
-    `${doc.path ? nova.path.basename(doc.path) : "(untitled)"} ` +
-    `syntax=${JSON.stringify(doc.syntax)}`;
-
-  console.log(
-    `[events] workspace path=${JSON.stringify(nova.workspace.path)} ` +
-      `openEditors=${nova.workspace.textEditors.length}`,
-  );
-
-  disposables.add(
-    nova.workspace.onDidAddTextEditor((editor) => {
-      const doc = editor.document;
-      console.log(
-        `[events] editor opened: ${describe(doc)} ` +
-          `isJava=${doc.syntax === "java"} uri=${doc.uri}`,
-      );
-      if (doc.path?.endsWith(".java") && doc.syntax !== "java") {
-        console.error(
-          `[events] MISMATCH: ${nova.path.basename(doc.path)} is a .java file ` +
-            `but Nova reports syntax=${JSON.stringify(doc.syntax)}. The language ` +
-            `client is bound to "java", so Nova will not send hover or ` +
-            `completion for this editor.`,
-        );
-      }
-
-      disposables.add(
-        editor.onDidStopChanging((ed) =>
-          console.log(`[events] stopped changing: ${describe(ed.document)}`),
-        ),
-      );
-      disposables.add(
-        editor.onDidSave((ed) =>
-          console.log(`[events] saved: ${describe(ed.document)}`),
-        ),
-      );
-      disposables.add(
-        editor.onDidDestroy((ed) =>
-          console.log(`[events] editor closed: ${describe(ed.document)}`),
-        ),
-      );
-    }),
-  );
-}
-
-/** Dump the settings the extension actually resolved, and where from. */
-function logResolvedConfig(): void {
-  for (const key of Object.values(config)) {
-    const workspace = nova.workspace?.config.get(key) ?? null;
-    const global = nova.config.get(key) ?? null;
-    console.log(
-      `[config] ${key} = ${JSON.stringify(getConfig(key))} ` +
-        `(workspace=${JSON.stringify(workspace)}, global=${JSON.stringify(global)})`,
-    );
-  }
-}
 
 /**
  * Watch a setting and react only when its effective value actually changed.
@@ -269,7 +214,7 @@ function logResolvedConfig(): void {
  * fires on both — so an unguarded listener runs its callback twice. That is
  * cheap for most things and ruinous for a restart: each one costs JDT.LS a
  * full project re-import, during which the server answers nothing. Comparing
- * against the last value collapses the duplicates. (Pattern from nova-gobee.)
+ * against the last value collapses the duplicates.
  */
 function watchConfig(key: string, onChange: () => void): void {
   let previous = JSON.stringify(getConfig(key) ?? null);
