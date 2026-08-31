@@ -94,6 +94,9 @@ export class JavaLanguageServer {
    */
   private queue: Promise<void> = Promise.resolve();
 
+  /** Called once the server starts answering requests, so views can load. */
+  onDidBecomeReady: (() => void) | null = null;
+
   constructor(info: InformationView) {
     this.info = info;
   }
@@ -286,8 +289,11 @@ export class JavaLanguageServer {
         case "Started":
         case "ServiceReady":
           // JDT.LS sends both; only announce the transition once.
-          if (!this.ready) console.log("Java language server is ready.");
-          this.ready = true;
+          if (!this.ready) {
+            console.log("Java language server is ready.");
+            this.ready = true;
+            this.onDidBecomeReady?.();
+          }
           this.info.setStatus("running", status.message);
           break;
         case "Error":

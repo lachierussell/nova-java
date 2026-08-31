@@ -3,7 +3,7 @@
   "name": "Java",
   "organization": "Parkcedar",
   "description": "Complete Java development support with Eclipse JDT.LS, tree-sitter syntax highlighting, intelligent code completion, navigation, refactoring, and real-time diagnostics.",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "categories": [
     "commands",
     "languages",
@@ -386,8 +386,6 @@
     {
       "id": "java.sidebar",
       "name": "Java",
-      "smallImage": "java",
-      "largeImage": "java",
       "sections": [
         {
           "id": "java.sidebar.info",
@@ -405,28 +403,12 @@
         {
           "id": "java.sidebar.references",
           "name": "References",
-          "placeholderText": "Results from \"Find References\" appear here.",
-          "placeholderImage": "java",
-          "headerCommands": [
-            {
-              "title": "Find References",
-              "command": "java.findReferences",
-              "tooltip": "Find references to the selected symbol"
-            }
-          ]
+          "placeholderText": "Results from \"Find References\" appear here."
         },
         {
           "id": "java.sidebar.symbols",
           "name": "Symbols",
-          "placeholderText": "Results from \"Find Symbols\" appear here.",
-          "placeholderImage": "java",
-          "headerCommands": [
-            {
-              "title": "Find Symbol",
-              "command": "java.findSymbols",
-              "tooltip": "Open the Find Symbol dialog"
-            }
-          ]
+          "placeholderText": "No symbols in the active Java file."
         }
       ]
     }

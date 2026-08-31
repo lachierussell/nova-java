@@ -14,7 +14,6 @@ import { revealLocation } from "../reveal";
 import { notify } from "../notify";
 import { promptInput } from "../novaUtils";
 import { ReferencesView } from "../sidebar/referencesView";
-import { SymbolInformation, SymbolsView } from "../sidebar/symbolsView";
 
 /** Build the `{ textDocument, position }` params for the editor's cursor. */
 function positionParams(editor: TextEditor): {
@@ -306,7 +305,6 @@ async function runCodeAction(
 
 export async function findWorkspaceSymbol(
   client: LanguageClient,
-  view: SymbolsView,
 ): Promise<void> {
   const query = await promptInput("Enter symbol name:", {
     label: "Find Symbol",
@@ -314,11 +312,35 @@ export async function findWorkspaceSymbol(
   if (query == null) return;
   const result = (await client.sendRequest("workspace/symbol", {
     query,
-  })) as SymbolInformation[] | null;
+  })) as WorkspaceSymbol[] | null;
   const symbols = result ?? [];
   if (symbols.length === 0) {
     notify.info("No symbols found.");
     return;
   }
-  view.show(symbols);
+  // The sidebar tracks the active file, so workspace-wide hits are offered as
+  // a palette to jump from rather than parked in a view.
+  const labels = symbols.map((symbol) =>
+    symbol.containerName ? `${symbol.name} — ${symbol.containerName}` : symbol.name,
+  );
+  return new Promise((resolve) => {
+    nova.workspace.showChoicePalette(
+      labels,
+      { placeholder: "Find Symbol" },
+      (_sel, index) => {
+        if (index != null && index >= 0) {
+          void revealLocation(symbols[index].location).then(resolve);
+        } else {
+          resolve();
+        }
+      },
+    );
+  });
+}
+
+interface WorkspaceSymbol {
+  name: string;
+  kind: number;
+  location: LspLocation;
+  containerName?: string;
 }

@@ -22,14 +22,19 @@ export function activate(): void {
   referencesView = new ReferencesView();
   disposables.add(referencesView.treeView);
 
-  symbolsView = new SymbolsView();
+  symbolsView = new SymbolsView(() =>
+    server?.isReady ? (server.languageClient ?? null) : null,
+  );
   disposables.add(symbolsView.treeView);
 
   server = new JavaLanguageServer(infoView);
 
+  server.onDidBecomeReady = () => symbolsView?.refresh(true);
+
   logResolvedConfig();
   registerCommands();
   registerSaveListeners();
+  registerSymbolTracking();
   registerConfigReload();
   registerEventLogging();
 
@@ -99,7 +104,7 @@ function registerCommands(): void {
   reg("java.findSymbols", async () => {
     const client = requireClient();
     if (!client) return;
-    await lsp.findWorkspaceSymbol(client, symbolsView!);
+    await lsp.findWorkspaceSymbol(client);
   });
   reg("java.openSymbol", () => symbolsView?.openSelected());
 
@@ -112,6 +117,32 @@ function registerCommands(): void {
   reg("java.restartServer", () => server?.restart());
   reg("java.preferences", () => nova.workspace.openConfig());
   reg("java.extensionPreferences", () => nova.openConfig());
+}
+
+// ---------------------------------------------------------------------------
+// Symbols sidebar: follow the active editor, like Nova's built-in Symbols tab.
+// ---------------------------------------------------------------------------
+
+/**
+ * Keep the Symbols section in step with what is on screen.
+ *
+ * Nova has no "active editor changed" event, so selection changes stand in for
+ * it: whichever editor the user is working in is the one reporting them. Those
+ * refreshes are cheap — the view skips the request when the file it already
+ * describes is still the active one — while edits and saves force a reload.
+ */
+function registerSymbolTracking(): void {
+  const view = symbolsView!;
+  disposables.add(view.treeView.onDidChangeVisibility(() => view.refresh()));
+  disposables.add(
+    nova.workspace.onDidAddTextEditor((editor) => {
+      view.refresh();
+      disposables.add(editor.onDidChangeSelection(() => view.refresh()));
+      disposables.add(editor.onDidStopChanging(() => view.refresh(true)));
+      disposables.add(editor.onDidSave(() => view.refresh(true)));
+      disposables.add(editor.onDidDestroy(() => view.refresh(true)));
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------

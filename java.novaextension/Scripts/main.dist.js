@@ -419,6 +419,7 @@ class JavaLanguageServer {
     this.lastDataDir = null;
     this.ready = false;
     this.queue = Promise.resolve();
+    this.onDidBecomeReady = null;
     this.info = info;
   }
   get languageClient() {
@@ -570,8 +571,11 @@ class JavaLanguageServer {
           break;
         case "Started":
         case "ServiceReady":
-          if (!this.ready) console.log("Java language server is ready.");
-          this.ready = true;
+          if (!this.ready) {
+            console.log("Java language server is ready.");
+            this.ready = true;
+            this.onDidBecomeReady?.();
+          }
           this.info.setStatus("running", status.message);
           break;
         case "Error":
@@ -1047,6 +1051,9 @@ class ReferencesView {
   }
 }
 const SYMBOL_IMAGES = {
+  2: "__symbol.package",
+  3: "__symbol.package",
+  4: "__symbol.package",
   5: "__symbol.class",
   6: "__symbol.method",
   7: "__symbol.property",
@@ -1060,33 +1067,116 @@ const SYMBOL_IMAGES = {
   22: "__symbol.enum-member"
 };
 class SymbolsView {
-  constructor() {
-    this.symbols = [];
+  constructor(getClient) {
+    this.getClient = getClient;
+    this.roots = [];
+    this.parents = /* @__PURE__ */ new Map();
+    this.pendingForce = false;
+    this.loadedUri = null;
+    this.generation = 0;
     this.tree = new TreeView("java.sidebar.symbols", { dataProvider: this });
   }
   get treeView() {
     return this.tree;
   }
-  show(symbols) {
-    this.symbols = symbols;
-    this.tree.reload();
-    this.tree.reveal(symbols[0], { focus: false, reveal: 3 });
+  /**
+   * Reload from the active editor, coalescing bursts of events into one request.
+   *
+   * Unforced refreshes are how the view follows the active editor, and they
+   * fire on every cursor move — so they do nothing when the file on screen is
+   * already the one in the tree. Edits and saves pass `force`.
+   */
+  refresh(force = false) {
+    this.pendingForce = this.pendingForce || force;
+    if (this.pending != null) clearTimeout(this.pending);
+    this.pending = setTimeout(() => {
+      this.pending = void 0;
+      const forced = this.pendingForce;
+      this.pendingForce = false;
+      void this.load(forced);
+    }, 200);
   }
   async openSelected() {
     const [selected] = this.tree.selection;
-    if (selected) await revealLocation(selected.location);
+    if (selected) {
+      await revealLocation({ uri: selected.uri, range: selected.range });
+    }
+  }
+  async load(force) {
+    const doc = nova.workspace.activeTextEditor?.document;
+    const client2 = this.getClient();
+    if (!doc || doc.syntax !== "java" || !client2) {
+      this.loadedUri = null;
+      this.setRoots([]);
+      return;
+    }
+    if (!force && doc.uri === this.loadedUri) return;
+    const token = ++this.generation;
+    let result;
+    try {
+      result = await client2.sendRequest("textDocument/documentSymbol", {
+        textDocument: { uri: doc.uri }
+      });
+    } catch (err) {
+      console.warn("textDocument/documentSymbol failed:", String(err));
+      result = null;
+    }
+    if (token !== this.generation) return;
+    this.loadedUri = result ? doc.uri : null;
+    this.setRoots(toNodes(result, doc.uri));
+  }
+  setRoots(roots) {
+    this.roots = roots;
+    this.parents.clear();
+    const record = (nodes, parent) => {
+      for (const node of nodes) {
+        this.parents.set(node, parent);
+        record(node.children, node);
+      }
+    };
+    record(roots, null);
+    void this.tree.reload();
   }
   getChildren(element) {
-    return element ? [] : this.symbols;
+    return element ? element.children : this.roots;
+  }
+  getParent(element) {
+    return this.parents.get(element) ?? null;
   }
   getTreeItem(element) {
-    const item = new TreeItem(element.name, TreeItemCollapsibleState.None);
-    item.descriptiveText = element.containerName ?? "";
+    const item = new TreeItem(
+      element.name,
+      element.children.length > 0 ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.None
+    );
+    item.descriptiveText = element.detail;
+    item.tooltip = element.detail ? `${element.name} ${element.detail}` : element.name;
     item.command = "java.openSymbol";
     const image = SYMBOL_IMAGES[element.kind];
     if (image) item.image = image;
     return item;
   }
+}
+function toNodes(result, uri) {
+  if (!Array.isArray(result) || result.length === 0) return [];
+  if ("location" in result[0]) {
+    return result.map((symbol) => ({
+      name: symbol.name,
+      detail: symbol.containerName ?? "",
+      kind: symbol.kind,
+      uri: symbol.location.uri,
+      range: symbol.location.range,
+      children: []
+    }));
+  }
+  const convert = (symbol) => ({
+    name: symbol.name,
+    detail: symbol.detail ?? "",
+    kind: symbol.kind,
+    uri,
+    range: symbol.selectionRange ?? symbol.range,
+    children: (symbol.children ?? []).map(convert)
+  });
+  return result.map(convert);
 }
 function planTextEdits(text, edits) {
   const planned = [];
@@ -1337,7 +1427,7 @@ async function runCodeAction(client2, action) {
     });
   }
 }
-async function findWorkspaceSymbol(client2, view) {
+async function findWorkspaceSymbol(client2) {
   const query = await promptInput("Enter symbol name:", {
     label: "Find Symbol"
   });
@@ -1350,7 +1440,22 @@ async function findWorkspaceSymbol(client2, view) {
     notify.info("No symbols found.");
     return;
   }
-  view.show(symbols);
+  const labels = symbols.map(
+    (symbol) => symbol.containerName ? `${symbol.name} — ${symbol.containerName}` : symbol.name
+  );
+  return new Promise((resolve) => {
+    nova.workspace.showChoicePalette(
+      labels,
+      { placeholder: "Find Symbol" },
+      (_sel, index) => {
+        if (index != null && index >= 0) {
+          void revealLocation(symbols[index].location).then(resolve);
+        } else {
+          resolve();
+        }
+      }
+    );
+  });
 }
 async function formatDocument(client2, editor) {
   const formatter = getConfig(config.formatter) ?? "lsp";
@@ -1428,12 +1533,16 @@ function activate() {
   disposables.add(infoView.treeView);
   referencesView = new ReferencesView();
   disposables.add(referencesView.treeView);
-  symbolsView = new SymbolsView();
+  symbolsView = new SymbolsView(
+    () => server?.isReady ? server.languageClient ?? null : null
+  );
   disposables.add(symbolsView.treeView);
   server = new JavaLanguageServer(infoView);
+  server.onDidBecomeReady = () => symbolsView?.refresh(true);
   logResolvedConfig();
   registerCommands();
   registerSaveListeners();
+  registerSymbolTracking();
   registerConfigReload();
   registerEventLogging();
   void server.start();
@@ -1484,7 +1593,7 @@ function registerCommands() {
   reg("java.findSymbols", async () => {
     const client2 = requireClient();
     if (!client2) return;
-    await findWorkspaceSymbol(client2, symbolsView);
+    await findWorkspaceSymbol(client2);
   });
   reg("java.openSymbol", () => symbolsView?.openSelected());
   reg("java.formatFile", editorCommand(formatDocument));
@@ -1495,6 +1604,19 @@ function registerCommands() {
   reg("java.restartServer", () => server?.restart());
   reg("java.preferences", () => nova.workspace.openConfig());
   reg("java.extensionPreferences", () => nova.openConfig());
+}
+function registerSymbolTracking() {
+  const view = symbolsView;
+  disposables.add(view.treeView.onDidChangeVisibility(() => view.refresh()));
+  disposables.add(
+    nova.workspace.onDidAddTextEditor((editor) => {
+      view.refresh();
+      disposables.add(editor.onDidChangeSelection(() => view.refresh()));
+      disposables.add(editor.onDidStopChanging(() => view.refresh(true)));
+      disposables.add(editor.onDidSave(() => view.refresh(true)));
+      disposables.add(editor.onDidDestroy(() => view.refresh(true)));
+    })
+  );
 }
 function registerSaveListeners() {
   disposables.add(
