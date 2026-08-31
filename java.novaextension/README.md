@@ -1,135 +1,136 @@
-# Java Extension for Nova
-A comprehensive Java development extension for Nova editor, providing rich language support through Eclipse JDT Language Server, tree-sitter syntax highlighting, and integrated linting.
+# Java for Nova
 
-## ✨ Features
-- **Syntax Highlighting** - Fast, accurate syntax highlighting via tree-sitter
-- **Code Intelligence** - Powered by Eclipse JDT Language Server
-  - Auto-completion
-  - Hover documentation
-  - Signature help
-- **Navigation**
-  - Jump to Definition
-  - Jump to Type Definition
-  - Jump to Implementation
-  - Find References
-  - Find Symbol
-- **Code Actions**
-  - Quick fixes & refactorings (⌥⏎) — add imports, implement methods, create fields, and more
-  - Format File / Format Selection
-  - Organize Imports (on demand or on save)
-  - Rename Symbol
-- **Linting** - Real-time diagnostics and error checking
-- **Inlay Hints** - Optional inline parameter-name hints
-- **Code Folding** - Fold classes, methods, blocks, and comments
-- **Symbol Outline** - Navigate your code structure
-- **Language Server sidebar** - See server status and the resolved JDK at a glance
+Java language support for Nova, powered by [Eclipse JDT.LS](https://github.com/eclipse-jdtls/eclipse.jdt.ls).
+You get completion, diagnostics, navigation and refactoring — the things you'd
+expect from a Java IDE — without leaving Nova.
 
-![](https://raw.githubusercontent.com/lachierussell/nova-java/8049c463ad5f1614b91dbbbabbe77a8af1f7c1cf/Images/Screenshot%202025-12-06%20at%2012.46.00.png?token=GHSAT0AAAAAADQGA6TK7WN5EFNONY4BG7XI2JTRW7Q)
+Works with Maven, Gradle and plain Eclipse projects.
 
-### Java Development Kit (JDK)
-You need JDK 21 or later installed on your system.
+## The Java sidebar
 
-**macOS:**
+![The Java sidebar in Nova, showing the Language Server, References and Symbols sections](https://raw.githubusercontent.com/lachierussell/nova-java/main/Images/sidebar.png)
+
+Three sections, all in one place:
+
+**Language Server** — is it running, and what is it running with? The status dot
+turns green once the server has finished importing your project (which can take
+a minute on a big one), and the rows below show the JDK, server and project root
+it actually resolved. When something isn't working, this is the first place to
+look. The refresh button restarts the server.
+
+**References** — results from *Find References*. Click a row to jump to it.
+
+**Symbols** — the structure of the file you're editing: classes, methods and
+fields, nested the way they are in the code. It follows whichever file is in
+front of you and updates as you type.
+
+## What you get
+
+**Writing code**
+- Completion, hover documentation and signature help
+- Real-time errors and warnings as you type
+- Quick fixes and refactorings at the cursor (`⌥⏎`) — add an import, implement
+  an interface, create a missing field
+- Optional inline parameter-name hints
+
+**Moving around**
+- Jump to Definition, Type Definition and Implementation
+- Find References
+- Find Symbol across the whole project
+- Jumping into a library or JDK class opens its decompiled source
+
+**Tidying up**
+- Format File (`⌥⇧F`) or just the selection
+- Organize Imports
+- Rename Symbol across every file that uses it
+- Both formatting and organize-imports can run automatically on save
+
+**Reading code**
+- Fast tree-sitter syntax highlighting
+- Code folding for classes, methods, blocks and comments
+
+## Before you start
+
+You need two things installed.
+
+**A JDK, version 21 or newer.** The extension finds it automatically from
+`JAVA_HOME`, jenv, or the standard macOS locations.
+
 ```bash
-# Check if Java is installed
-java -version
-
-# Install via Homebrew
+java -version          # check what you have
 brew install openjdk@21
 ```
 
-### Eclipse JDT Language Server
+**The Eclipse JDT language server.**
 
-The extension requires Eclipse JDT.LS (Java Language Server).
-
-**Installation via Homebrew (Recommended):**
 ```bash
 brew install jdtls
 ```
 
-## 🚀 Getting Started
+If either one lives somewhere unusual, point at it in the extension preferences.
 
-1. **Install the Extension**
-   - Open Nova
-   - Go to Extensions Library
-   - Search for "Java"
-   - Click Install
+## Getting started
 
-2. **Configure JDK Path** (if not auto-detected)
-   - Open Extension Preferences: `Extensions → Extension Library → Java → Preferences`
-   - Set "Java JDK Home" to your JDK installation path
-   - Example: `/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home`
+1. Install the extension from Nova's Extension Library.
+2. Open a Java project. The extension starts on its own when you open a `.java`
+   file.
+3. Watch the **Language Server** section in the Java sidebar. It says
+   *Starting…* with a progress percentage while JDT.LS imports the project, then
+   *Running*. Completion and navigation work from that point on.
 
-3. **Open a Java Project**
-   - The extension activates automatically when you open `.java` files
-   - Supports Maven (`pom.xml`) and Gradle (`build.gradle`) projects
-   - For Eclipse projects, ensure `.project` file exists
+The first import on a large project takes a while. Later ones are much faster.
 
-## ⚙️ Configuration
+## Commands
 
-### Global Settings
+In the **Editor** menu whenever a Java file is open:
 
-Access via `Extensions → Extension Library → Java → Preferences`
+| Command | Shortcut |
+| --- | --- |
+| Jump To Definition | |
+| Jump To Type Definition | |
+| Jump To Implementation | |
+| Find References | |
+| Find Symbol | |
+| Code Actions… | `⌥⏎` |
+| Rename Symbol | |
+| Format File | `⌥⇧F` |
+| Format Selection | |
+| Organize Imports | |
 
-**Language Server:**
-- Choose between automatic or custom language server
-- Configure custom JDK path
-- Set language server path
+**Restart Language Server** is in the Extensions menu, and on the sidebar's
+Language Server header.
 
-**Project:**
-- Project root — point the language server at a subfolder instead of the whole workspace
-- Gradle wrapper path — where `gradlew` lives (searched upwards from the project root by default)
+## Settings
 
-**Formatting:**
-- Enable/disable format on save
-- Choose formatter: Language Server (Eclipse JDT) or Gradle Spotless
-- Choose formatting style (Google, AOSP, Eclipse, Palantir, or Custom)
+Global settings live in `Extensions → Extension Library → Java → Preferences`.
+Per-project settings live in `Project → Project Settings → Java`, and override
+the global ones.
 
-**Linting:**
-- Enable/disable diagnostic linting
+**Language server** — which server to use, a custom server path, and the JDK
+home. Leave these blank unless auto-detection picks the wrong thing.
 
-### Workspace Settings
+**Project** — the project root (point JDT.LS at one module instead of a whole
+monorepo) and where `gradlew` lives. Per-project settings also cover extra
+source paths, the output directory and referenced JARs.
 
-Access via `Project → Project Settings → Java`
+**Formatting** — format on save, organize imports on save, which formatter, and
+which style.
 
-Configure per-project settings:
-- Project root and Gradle wrapper path
-- JDK home
-- Format on save behaviour
-- Formatter choice (inherit from global or override)
-- Source paths
-- Output path
-- Referenced libraries (JAR files)
+**Linting** — turn diagnostics off if you'd rather not see them.
 
-## 🎨 Formatting
+## Formatting
 
-The extension supports two formatting approaches:
+Two options, set by **Formatter** in preferences.
 
-### Language Server Formatter (Eclipse JDT)
+**Language Server (Eclipse JDT)** is the default and needs no project setup.
+Pick a style: Google Java Style, AOSP, Eclipse's own default, or Custom — which
+takes an Eclipse formatter XML file, either a local path or a URL.
 
-Uses the built-in Eclipse JDT formatter with these style presets:
+**Gradle Spotless** runs `./gradlew spotlessApply` instead, so your project's
+own Spotless config decides the formatting. Use this if your team already
+standardises on Spotless — it's also how to get Palantir Java Format, which the
+Eclipse formatter can't do.
 
-- **Google Java Style** - Google's Java style guide
-- **AOSP** - Android Open Source Project style
-- **Eclipse** - Eclipse IDE default style
-- **Palantir Java Format** - Palantir's Java style
-- **Custom** - Configure your own style
-
-### Gradle Spotless Formatter
-
-Uses Gradle Spotless with Palantir Java Format. This option:
-
-- Runs `./gradlew spotlessApply` on format
-- Requires a Gradle project with Spotless configured
-- Uses your project's existing Spotless configuration
-- Modifies files on disk (you'll need to reload after formatting)
-
-**To use Spotless:**
-1. Ensure your project has `build.gradle` with Spotless configured
-2. Set formatter to "Gradle Spotless (Palantir)" in preferences
-3. Format will run `./gradlew spotlessApply` automatically
-
-**Example Spotless configuration in `build.gradle`:**
 ```gradle
 plugins {
     id 'com.diffplug.spotless' version '6.x.x'
@@ -142,40 +143,44 @@ spotless {
 }
 ```
 
-## 🔧 Commands
+Spotless rewrites files on disk and Nova reloads them. On a machine with no
+network, turn on **Run Spotless offline** — otherwise Gradle spends minutes
+trying to reach the plugin portal and formatting appears to hang.
 
-All commands are available in the Editor menu when editing Java files:
+## When something's wrong
 
-- **Jump To Definition** - Navigate to symbol definition
-- **Jump To Type Definition** - Navigate to type definition
-- **Jump To Implementation** - Navigate to implementation
-- **Find References** - Find all references to a symbol
-- **Find Symbol** - Search for symbols in workspace
-- **Code Actions…** - Quick fixes and refactorings at the cursor (⌥⏎)
-- **Format File** - Format current file (⌥⇧F)
-- **Format Selection** - Format just the selected range
-- **Organize Imports** - Organize and optimize imports
-- **Rename Symbol** - Rename symbol across workspace
-- **Restart Language Server** - Restart the Java language server
+Check the **Language Server** section first. It tells you what the extension
+resolved and what state the server is in:
 
-## 🛠 Building from source
+- *Failed* with no JDK — install a JDK 21+, or set **Java JDK Home**.
+- *Failed* with no server — `brew install jdtls`, or set a custom server path.
+- Stuck on *Starting…* — JDT.LS is still importing. Large projects take a while.
+- Nothing works, but the status says *Running* — open the Extension Console
+  (`Extensions → Show Extension Console`). Turning on **Log language server
+  traffic** in preferences records the full conversation with the server.
 
-The extension is written in TypeScript and bundled to a single script with Vite.
+If the server gets wedged, **Restart Language Server** gives it a clean start.
+
+## Building from source
+
+Written in TypeScript, bundled with Vite.
 
 ```bash
-npm install       # install dev dependencies (TypeScript 7, Vite)
+npm install       # dev dependencies
 npm run build     # bundle src/ → Scripts/main.dist.js
-npm run watch     # rebuild on change during development
-npm run typecheck # type-check without emitting
+npm run watch     # rebuild on change
+npm run typecheck # type-check only
+npm test          # run the test suite
 ```
 
-The bundled `Scripts/main.dist.js` is the extension's entry point (`main` in
-`extension.json`). It is generated, so it is not committed — run `npm run build`
-before installing or submitting the extension.
+`Scripts/main.dist.js` is generated and not committed, so run `npm run build`
+before installing or submitting.
 
 ## Acknowledgements
-- This repo is heavily inspired (originally forked from) the nova-gobee extension. 
+
+Originally forked from, and still heavily inspired by, the
+[nova-gobee](https://github.com/gobee-dev/nova-gobee) extension.
 
 ---
 
-**Enjoy coding in Java with Nova!** ☕️
+Bugs and feature requests: [github.com/lachierussell/nova-java/issues](https://github.com/lachierussell/nova-java/issues)

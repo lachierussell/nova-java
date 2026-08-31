@@ -25,5 +25,19 @@ tree-sitter-java/
 node_modules/
 java.novaextension/Scripts/main.dist.js
 
+# Vitest / Vite caches and test output
+node_modules/.vite/
+.vitest/
+coverage/
+*.timestamp-*.mjs
+
 # Test workspace build output
 test-workspace/target/
+
+# Eclipse / JDT.LS generated project files
+.classpath
+.project
+.factorypath
+.settings/
+bin/
+.metadata/
