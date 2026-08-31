@@ -947,6 +947,12 @@ function hashPath(path) {
   }
   return (hash2 >>> 0).toString(36);
 }
+const STATUS_IMAGES = {
+  stopped: "status-stopped",
+  starting: "status-starting",
+  running: "status-running",
+  failed: "status-failed"
+};
 class InformationView {
   constructor() {
     this.status = "stopped";
@@ -993,7 +999,12 @@ class InformationView {
     };
     const status = this.statusDetail ? `${label[this.status]} — ${this.statusDetail}` : label[this.status];
     return [
-      { id: "status", label: "Status", value: status },
+      {
+        id: "status",
+        label: "Status",
+        value: status,
+        image: STATUS_IMAGES[this.status]
+      },
       { id: "jdk", label: "JDK", value: this.javaHome },
       { id: "server", label: "Language server", value: this.serverPath },
       { id: "root", label: "Project root", value: this.projectRoot },
@@ -1010,6 +1021,7 @@ class InformationView {
       row?.label ?? element,
       TreeItemCollapsibleState.None
     );
+    if (row?.image) item.image = row.image;
     item.descriptiveText = row?.value ?? "";
     item.tooltip = row?.value ?? "";
     item.identifier = element;

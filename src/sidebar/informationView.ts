@@ -8,7 +8,16 @@ interface Row {
   id: string;
   label: string;
   value: string;
+  image?: string;
 }
+
+/** Coloured dots (bundled in Images/) so the row reads at a glance. */
+const STATUS_IMAGES: Record<ServerStatus, string> = {
+  stopped: "status-stopped",
+  starting: "status-starting",
+  running: "status-running",
+  failed: "status-failed",
+};
 
 export class InformationView implements TreeDataProvider<string> {
   private readonly tree: TreeView<string>;
@@ -72,7 +81,12 @@ export class InformationView implements TreeDataProvider<string> {
       ? `${label[this.status]} — ${this.statusDetail}`
       : label[this.status];
     return [
-      { id: "status", label: "Status", value: status },
+      {
+        id: "status",
+        label: "Status",
+        value: status,
+        image: STATUS_IMAGES[this.status],
+      },
       { id: "jdk", label: "JDK", value: this.javaHome },
       { id: "server", label: "Language server", value: this.serverPath },
       { id: "root", label: "Project root", value: this.projectRoot },
@@ -91,6 +105,7 @@ export class InformationView implements TreeDataProvider<string> {
       row?.label ?? element,
       TreeItemCollapsibleState.None,
     );
+    if (row?.image) item.image = row.image;
     item.descriptiveText = row?.value ?? "";
     item.tooltip = row?.value ?? "";
     item.identifier = element;
