@@ -1,6 +1,3 @@
-/**
- * Sidebar tree listing the results of "Find References".
- */
 import { LspLocation, uriToPath } from "../lspNovaConversions";
 import { revealLocation } from "../reveal";
 
@@ -24,7 +21,6 @@ export class ReferencesView implements TreeDataProvider<LspLocation> {
     });
   }
 
-  /** Reveal the currently selected reference (invoked on activation). */
   async openSelected(): Promise<void> {
     const [selected] = this.tree.selection;
     if (selected) await revealLocation(selected);

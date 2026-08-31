@@ -1,8 +1,11 @@
-/**
- * A small TreeView that surfaces language-server status in the sidebar.
- */
-
 export type ServerStatus = "stopped" | "starting" | "running" | "failed";
+
+interface Details {
+  javaHome: string;
+  serverPath: string;
+  projectRoot: string;
+  gradleWrapper: string;
+}
 
 interface Row {
   id: string;
@@ -11,7 +14,6 @@ interface Row {
   image?: string;
 }
 
-/** Coloured dots (bundled in Images/) so the row reads at a glance. */
 const STATUS_IMAGES: Record<ServerStatus, string> = {
   stopped: "status-stopped",
   starting: "status-starting",
@@ -19,15 +21,25 @@ const STATUS_IMAGES: Record<ServerStatus, string> = {
   failed: "status-failed",
 };
 
+const STATUS_LABELS: Record<ServerStatus, string> = {
+  stopped: "Stopped",
+  starting: "Starting…",
+  running: "Running",
+  failed: "Failed",
+};
+
+const UNKNOWN = "—";
+
 export class InformationView implements TreeDataProvider<string> {
   private readonly tree: TreeView<string>;
   private status: ServerStatus = "stopped";
-  /** The server's own words about what it is doing, e.g. "63% Importing…". */
   private statusDetail = "";
-  private serverPath = "—";
-  private javaHome = "—";
-  private projectRoot = "—";
-  private gradleWrapper = "—";
+  private details: Details = {
+    javaHome: UNKNOWN,
+    serverPath: UNKNOWN,
+    projectRoot: UNKNOWN,
+    gradleWrapper: UNKNOWN,
+  };
 
   constructor() {
     this.tree = new TreeView("java.sidebar.info", { dataProvider: this });
@@ -40,46 +52,18 @@ export class InformationView implements TreeDataProvider<string> {
   setStatus(status: ServerStatus, detail?: string): void {
     this.status = status;
     this.statusDetail = detail?.trim() ?? "";
-    this.reload();
+    this.tree.reload();
   }
 
-  setServerPath(path: string): void {
-    this.serverPath = path;
-    this.reload();
-  }
-
-  setJavaHome(home: string): void {
-    this.javaHome = home;
-    this.reload();
-  }
-
-  setProjectRoot(path: string): void {
-    this.projectRoot = path;
-    this.reload();
-  }
-
-  setGradleWrapper(path: string): void {
-    this.gradleWrapper = path;
-    this.reload();
-  }
-
-  private reload(): void {
+  setDetails(changes: Partial<Details>): void {
+    this.details = { ...this.details, ...changes };
     this.tree.reload();
   }
 
   private rows(): Row[] {
-    const label: Record<ServerStatus, string> = {
-      stopped: "Stopped",
-      starting: "Starting…",
-      running: "Running",
-      failed: "Failed",
-    };
-    // Importing a project takes JDT.LS anywhere from seconds to minutes, and
-    // it answers nothing until that finishes — so show its progress rather
-    // than a bare "Starting…" that looks identical to a hung server.
     const status = this.statusDetail
-      ? `${label[this.status]} — ${this.statusDetail}`
-      : label[this.status];
+      ? `${STATUS_LABELS[this.status]} — ${this.statusDetail}`
+      : STATUS_LABELS[this.status];
     return [
       {
         id: "status",
@@ -87,16 +71,19 @@ export class InformationView implements TreeDataProvider<string> {
         value: status,
         image: STATUS_IMAGES[this.status],
       },
-      { id: "jdk", label: "JDK", value: this.javaHome },
-      { id: "server", label: "Language server", value: this.serverPath },
-      { id: "root", label: "Project root", value: this.projectRoot },
-      { id: "gradlew", label: "Gradle wrapper", value: this.gradleWrapper },
+      { id: "jdk", label: "JDK", value: this.details.javaHome },
+      { id: "server", label: "Language server", value: this.details.serverPath },
+      { id: "root", label: "Project root", value: this.details.projectRoot },
+      {
+        id: "gradlew",
+        label: "Gradle wrapper",
+        value: this.details.gradleWrapper,
+      },
     ];
   }
 
   getChildren(element: string | null): string[] {
-    if (element == null) return this.rows().map((r) => r.id);
-    return [];
+    return element == null ? this.rows().map((r) => r.id) : [];
   }
 
   getTreeItem(element: string): TreeItem {

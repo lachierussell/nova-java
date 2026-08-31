@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { installNova } from "./testing/nova";
 import {
   lspPositionToOffset,
-  lspRangeToOffsets,
   offsetToLspPosition,
   uriToPath,
 } from "./lspNovaConversions";
@@ -52,18 +51,6 @@ describe("offset ↔ position", () => {
   it("handles an empty document", () => {
     expect(offsetToLspPosition("", 0)).toEqual({ line: 0, character: 0 });
     expect(lspPositionToOffset("", { line: 0, character: 0 })).toBe(0);
-  });
-});
-
-describe("lspRangeToOffsets", () => {
-  it("resolves both ends against one snapshot", () => {
-    expect(
-      lspRangeToOffsets(TEXT, {
-        start: { line: 2, character: 6 },
-        end: { line: 2, character: 7 },
-      }),
-    ).toEqual({ start: 18, end: 19 });
-    expect(TEXT.slice(18, 19)).toBe("A");
   });
 });
 

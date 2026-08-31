@@ -15,27 +15,15 @@ export interface WorkspaceEdit {
   documentChanges?: TextDocumentEdit[];
 }
 
-/** A resolved edit: flat character offsets into the snapshot, plus replacement. */
 interface PlannedEdit {
   start: number;
   end: number;
   newText: string;
 }
 
-/**
- * Resolve LSP edits into flat offsets against a single snapshot of the
- * document, ordered back-to-front.
- *
- * Every offset must be computed from the *same* text. Resolving each edit
- * against the live document as the transaction mutates it makes later
- * conversions see shifted line starts, which lands replacements a few
- * characters off and shreds the file ("impo  rt", "j a va"). Snapshot once,
- * convert everything, then apply from the end so earlier offsets stay valid.
- *
- * Returns null when the server sent edits that cannot be applied safely —
- * overlapping ranges, or ranges outside the document. That means our text and
- * the server's have diverged, and applying them would corrupt the file.
- */
+// Converting against the live document as the transaction mutates it shifts
+// later line starts and shreds the file, so: snapshot once, convert all, apply
+// from the end. Null means the edits overlap or fall outside the document.
 function planTextEdits(
   text: string,
   edits: readonly LspTextEdit[],
@@ -45,28 +33,19 @@ function planTextEdits(
   for (const edit of edits) {
     const start = positionToOffset(text, starts, edit.range.start);
     const end = positionToOffset(text, starts, edit.range.end);
-    // Out of bounds means the server was formatting a different revision of
-    // the document than the one we hold.
     if (start < 0 || end > text.length || start > end) return null;
     planned.push({ start, end, newText: edit.newText });
   }
 
-  // Back-to-front. Ties break on the longer range first so a replacement and a
-  // pure insertion at the same offset keep a deterministic order.
   planned.sort((a, b) => b.start - a.start || b.end - a.end);
 
   for (let i = 1; i < planned.length; i++) {
-    // Sorted descending, so the previous entry starts at or after this one ends.
     if (planned[i].end > planned[i - 1].start) return null;
   }
 
   return planned;
 }
 
-/**
- * Apply a list of LSP TextEdits to an already-open editor. Resolves to false
- * if the edits were rejected as unsafe.
- */
 export async function applyTextEdits(
   editor: TextEditor,
   edits: readonly LspTextEdit[],
@@ -91,12 +70,6 @@ export async function applyTextEdits(
   return true;
 }
 
-/**
- * Collect a WorkspaceEdit into one edit list per document URI.
- *
- * `documentChanges` wins over `changes` when both are present, as the spec
- * requires.
- */
 export function groupWorkspaceEdit(
   edit: WorkspaceEdit,
 ): Map<string, LspTextEdit[]> {
@@ -104,13 +77,9 @@ export function groupWorkspaceEdit(
 
   if (edit.documentChanges) {
     for (const change of edit.documentChanges) {
-      // `documentChanges` also carries create/rename/delete file operations,
-      // which have no `textDocument` and no edits. Nova cannot perform those,
-      // so skip them rather than dereferencing undefined.
+      // Create/rename/delete file operations, which Nova cannot perform.
       if (!change.textDocument || !change.edits) continue;
-      // A single document may appear more than once — JDT.LS splits a rename
-      // into several entries for the same file. Overwriting kept only the
-      // last, so most of a rename silently went missing.
+      // Appended, not assigned: JDT.LS splits a rename across several entries.
       const existing = perUri.get(change.textDocument.uri);
       if (existing) existing.push(...change.edits);
       else perUri.set(change.textDocument.uri, [...change.edits]);
@@ -124,11 +93,9 @@ export function groupWorkspaceEdit(
   return perUri;
 }
 
-/** Apply a full LSP WorkspaceEdit, opening each affected document. */
 export async function applyWorkspaceEdit(edit: WorkspaceEdit): Promise<void> {
   for (const [uri, edits] of groupWorkspaceEdit(edit)) {
     const editor = await nova.workspace.openFile(uri);
-    if (!editor) continue;
-    await applyTextEdits(editor, edits);
+    if (editor) await applyTextEdits(editor, edits);
   }
 }

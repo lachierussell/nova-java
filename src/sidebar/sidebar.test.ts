@@ -17,10 +17,12 @@ describe("InformationView", () => {
   it("shows the server status with its own progress message", async () => {
     const view = new InformationView();
     view.setStatus("starting", "63% Importing…");
-    view.setJavaHome("/jdk-21");
-    view.setServerPath("/opt/homebrew/bin/jdtls");
-    view.setProjectRoot("/p");
-    view.setGradleWrapper("/p/gradlew");
+    view.setDetails({
+      javaHome: "/jdk-21",
+      serverPath: "/opt/homebrew/bin/jdtls",
+      projectRoot: "/p",
+      gradleWrapper: "/p/gradlew",
+    });
 
     const rows = await nova.view("java.sidebar.info").rows();
     expect(rows.map((r) => [r.name, r.description])).toEqual([
@@ -45,7 +47,7 @@ describe("InformationView", () => {
     const tree = nova.view("java.sidebar.info");
     const before = tree.reloads;
     view.setStatus("running");
-    view.setJavaHome("/jdk-21");
+    view.setDetails({ javaHome: "/jdk-21" });
     expect(tree.reloads).toBe(before + 2);
   });
 });

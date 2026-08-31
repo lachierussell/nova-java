@@ -16,24 +16,39 @@ import { notify } from "../notify";
 import { promptInput } from "../novaUtils";
 import { ReferencesView } from "../sidebar/referencesView";
 
-/** Build the `{ textDocument, position }` params for the editor's cursor. */
+interface CodeAction {
+  title: string;
+  kind?: string;
+  edit?: WorkspaceEdit;
+  command?: { command: string; arguments?: unknown[]; title: string };
+}
+
+interface WorkspaceSymbol {
+  name: string;
+  kind: number;
+  location: LspLocation;
+  containerName?: string;
+}
+
+const ORGANIZE_KIND = "source.organizeImports";
+
 function positionParams(editor: TextEditor): {
   textDocument: { uri: string };
   position: { line: number; character: number };
 } {
   const doc = editor.document;
-  const text = documentText(doc);
   return {
     textDocument: { uri: doc.uri },
-    position: offsetToLspPosition(text, editor.selectedRange.start),
+    position: offsetToLspPosition(
+      documentText(doc),
+      editor.selectedRange.start,
+    ),
   };
 }
 
 function asLocationArray(result: unknown): LspLocation[] {
   if (!result) return [];
-  const list = Array.isArray(result) ? result : [result];
-  return list.map((r) => {
-    // Normalise LocationLink into Location.
+  return (Array.isArray(result) ? result : [result]).map((r) => {
     if (r && typeof r === "object" && "targetUri" in r) {
       const link = r as {
         targetUri: string;
@@ -49,31 +64,6 @@ function asLocationArray(result: unknown): LspLocation[] {
   });
 }
 
-/** Shared implementation for the definition-like "jump to a location" requests. */
-async function goToLocation(
-  client: LanguageClient,
-  editor: TextEditor,
-  method: string,
-  label: string,
-): Promise<void> {
-  const result = await client.sendRequest(method, positionParams(editor));
-  const locations = asLocationArray(result);
-  if (locations.length === 0) {
-    notify.info(`No ${label.toLowerCase()} found.`);
-    return;
-  }
-  if (locations.length === 1) {
-    await revealLocation(locations[0]);
-    return;
-  }
-  const chosen = await choose(locations, locationLabel, label);
-  if (chosen) await revealLocation(chosen);
-}
-
-/**
- * Show a choice palette and resolve with the chosen item, or null if the user
- * dismissed it.
- */
 function choose<T>(
   items: readonly T[],
   label: (item: T) => string,
@@ -90,9 +80,29 @@ function choose<T>(
   });
 }
 
-/** "A.java:42" — enough to tell two results apart in a palette. */
 function locationLabel(loc: LspLocation): string {
   return `${nova.path.basename(uriToPath(loc.uri))}:${loc.range.start.line + 1}`;
+}
+
+async function goToLocation(
+  client: LanguageClient,
+  editor: TextEditor,
+  method: string,
+  label: string,
+): Promise<void> {
+  const locations = asLocationArray(
+    await client.sendRequest(method, positionParams(editor)),
+  );
+  if (locations.length === 0) {
+    notify.info(`No ${label.toLowerCase()} found.`);
+    return;
+  }
+
+  const chosen =
+    locations.length === 1
+      ? locations[0]
+      : await choose(locations, locationLabel, label);
+  if (chosen) await revealLocation(chosen);
 }
 
 export function goToDefinition(
@@ -131,20 +141,16 @@ export async function findReferences(
   editor: TextEditor,
   view: ReferencesView,
 ): Promise<void> {
-  const params = {
+  const result = (await client.sendRequest("textDocument/references", {
     ...positionParams(editor),
     context: { includeDeclaration: true },
-  };
-  const result = (await client.sendRequest(
-    "textDocument/references",
-    params,
-  )) as LspLocation[] | null;
-  const locations = result ?? [];
-  if (locations.length === 0) {
+  })) as LspLocation[] | null;
+
+  if (!result || result.length === 0) {
     notify.info("No references found.");
     return;
   }
-  view.show(locations);
+  view.show(result);
 }
 
 export async function rename(
@@ -154,12 +160,12 @@ export async function rename(
   const newName = await promptInput("Rename symbol to:", {
     label: "Rename Symbol",
   });
-  if (newName == null || newName.length === 0) return;
-  const params = { ...positionParams(editor), newName };
-  const edit = (await client.sendRequest(
-    "textDocument/rename",
-    params,
-  )) as WorkspaceEdit | null;
+  if (!newName) return;
+
+  const edit = (await client.sendRequest("textDocument/rename", {
+    ...positionParams(editor),
+    newName,
+  })) as WorkspaceEdit | null;
   if (!edit) {
     notify.info("Symbol cannot be renamed here.");
     return;
@@ -167,79 +173,54 @@ export async function rename(
   await applyWorkspaceEdit(edit);
 }
 
-function formattingOptions(editor: TextEditor): {
-  tabSize: number;
-  insertSpaces: boolean;
-} {
-  return { tabSize: editor.tabLength, insertSpaces: editor.softTabs };
-}
-
-export async function formatDocumentLsp(
+/**
+ * The document is snapshotted around the round-trip because the server may
+ * answer from text that has since changed — on save, an organize-imports edit
+ * has often just landed — and those edits would scramble the file.
+ */
+async function requestFormatting(
   client: LanguageClient,
   editor: TextEditor,
+  method: string,
+  range?: LspRange,
 ): Promise<void> {
-  // Snapshot before the round-trip. On save we may have just applied an
-  // organize-imports edit, and the server can answer from the text it had
-  // before that change arrived — its positions would then refer to a document
-  // that no longer exists, which is how formatting used to scramble files.
   const before = documentText(editor.document);
-  const edits = (await client.sendRequest("textDocument/formatting", {
+  const edits = (await client.sendRequest(method, {
     textDocument: { uri: editor.document.uri },
-    options: formattingOptions(editor),
+    options: { tabSize: editor.tabLength, insertSpaces: editor.softTabs },
+    ...(range ? { range } : {}),
   })) as LspTextEdit[] | null;
+
   if (!edits || edits.length === 0) return;
-  if (!documentUnchanged(editor, before, "formatting")) return;
+  if (documentText(editor.document) !== before) {
+    console.warn(
+      `Discarding ${method} edits: the document changed while the language server was responding.`,
+    );
+    return;
+  }
   await applyTextEdits(editor, edits);
 }
 
-/**
- * Did the document change while we were waiting on the server? If so its edits
- * describe stale text and must be dropped rather than applied blindly.
- */
-function documentUnchanged(
+export function formatDocumentLsp(
+  client: LanguageClient,
   editor: TextEditor,
-  before: string,
-  what: string,
-): boolean {
-  if (documentText(editor.document) === before) return true;
-  console.warn(
-    `Discarding ${what} edits: the document changed while the language server was responding.`,
-  );
-  return false;
+): Promise<void> {
+  return requestFormatting(client, editor, "textDocument/formatting");
 }
 
-/** Format just the selection (falls back to the whole document). */
-export async function formatSelection(
+export function formatSelection(
   client: LanguageClient,
   editor: TextEditor,
 ): Promise<void> {
   const selection = editor.selectedRange;
-  if (selection.length === 0) {
-    await formatDocumentLsp(client, editor);
-    return;
-  }
+  if (selection.length === 0) return formatDocumentLsp(client, editor);
+
   const text = documentText(editor.document);
-  const edits = (await client.sendRequest("textDocument/rangeFormatting", {
-    textDocument: { uri: editor.document.uri },
-    range: {
-      start: offsetToLspPosition(text, selection.start),
-      end: offsetToLspPosition(text, selection.end),
-    },
-    options: formattingOptions(editor),
-  })) as LspTextEdit[] | null;
-  if (!edits || edits.length === 0) return;
-  if (!documentUnchanged(editor, text, "range formatting")) return;
-  await applyTextEdits(editor, edits);
+  return requestFormatting(client, editor, "textDocument/rangeFormatting", {
+    start: offsetToLspPosition(text, selection.start),
+    end: offsetToLspPosition(text, selection.end),
+  });
 }
-
-interface CodeAction {
-  title: string;
-  kind?: string;
-  edit?: WorkspaceEdit;
-  command?: { command: string; arguments?: unknown[]; title: string };
-}
-
-const ORGANIZE_KIND = "source.organizeImports";
 
 export async function organizeImports(
   client: LanguageClient,
@@ -247,16 +228,11 @@ export async function organizeImports(
 ): Promise<void> {
   const actions = (await client.sendRequest("textDocument/codeAction", {
     textDocument: { uri: editor.document.uri },
-    range: {
-      start: { line: 0, character: 0 },
-      end: { line: 0, character: 0 },
-    },
+    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
     context: { diagnostics: [], only: [ORGANIZE_KIND] },
   })) as CodeAction[] | null;
 
-  const action = (actions ?? []).find(
-    (a) => a.kind?.startsWith(ORGANIZE_KIND) ?? false,
-  );
+  const action = actions?.find((a) => a.kind?.startsWith(ORGANIZE_KIND));
   if (!action) {
     notify.info("Nothing to organize.");
     return;
@@ -264,17 +240,17 @@ export async function organizeImports(
   await runCodeAction(client, action);
 }
 
-/** Present all code actions / quick-fixes at the cursor as a palette. */
 export async function codeActions(
   client: LanguageClient,
   editor: TextEditor,
 ): Promise<void> {
   const text = documentText(editor.document);
-  const start = offsetToLspPosition(text, editor.selectedRange.start);
-  const end = offsetToLspPosition(text, editor.selectedRange.end);
   const actions = (await client.sendRequest("textDocument/codeAction", {
     textDocument: { uri: editor.document.uri },
-    range: { start, end },
+    range: {
+      start: offsetToLspPosition(text, editor.selectedRange.start),
+      end: offsetToLspPosition(text, editor.selectedRange.end),
+    },
     context: { diagnostics: [] },
   })) as CodeAction[] | null;
 
@@ -307,28 +283,22 @@ export async function findWorkspaceSymbol(
     label: "Find Symbol",
   });
   if (query == null) return;
-  const result = (await client.sendRequest("workspace/symbol", {
+
+  const symbols = ((await client.sendRequest("workspace/symbol", {
     query,
-  })) as WorkspaceSymbol[] | null;
-  const symbols = result ?? [];
+  })) ?? []) as WorkspaceSymbol[];
   if (symbols.length === 0) {
     notify.info("No symbols found.");
     return;
   }
-  // The sidebar tracks the active file, so workspace-wide hits are offered as
-  // a palette to jump from rather than parked in a view.
+
   const chosen = await choose(
     symbols,
     (symbol) =>
-      symbol.containerName ? `${symbol.name} — ${symbol.containerName}` : symbol.name,
+      symbol.containerName
+        ? `${symbol.name} — ${symbol.containerName}`
+        : symbol.name,
     "Find Symbol",
   );
   if (chosen) await revealLocation(chosen.location);
-}
-
-interface WorkspaceSymbol {
-  name: string;
-  kind: number;
-  location: LspLocation;
-  containerName?: string;
 }

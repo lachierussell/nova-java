@@ -1,5 +1,5 @@
 import { config, getConfig, getOverridableBoolean } from "./config";
-import { delay, wrapCommand } from "./novaUtils";
+import { debounce, delay, wrapCommand } from "./novaUtils";
 import { notify } from "./notify";
 import { JavaLanguageServer } from "./lspClient";
 import { InformationView } from "./sidebar/informationView";
@@ -28,7 +28,6 @@ export function activate(): void {
   disposables.add(symbolsView.treeView);
 
   server = new JavaLanguageServer(infoView);
-
   server.onDidBecomeReady = () => symbolsView?.refresh(true);
 
   registerCommands();
@@ -48,13 +47,8 @@ export function deactivate(): void {
   symbolsView = null;
 }
 
-/**
- * The live client, or null after telling the user why there isn't one.
- *
- * "Still importing" is a distinct state worth naming: JDT.LS accepts the
- * connection long before it can answer, so a command run too early comes back
- * empty and looks like a broken extension rather than a busy one.
- */
+// "Still importing" is named separately because a command run too early comes
+// back empty, which reads as a broken extension rather than a busy one.
 function requireClient(): LanguageClient | null {
   const client = server?.languageClient ?? null;
   if (!client) {
@@ -71,76 +65,61 @@ function requireClient(): LanguageClient | null {
   return client;
 }
 
-/** Run an editor command that needs a live client and the active editor. */
-function editorCommand(
-  fn: (client: LanguageClient, editor: TextEditor) => Promise<void>,
-): (editor: TextEditor) => Promise<void> {
-  return async (editor: TextEditor) => {
-    const client = requireClient();
-    if (!client) return;
-    await fn(client, editor);
-  };
-}
+const EDITOR_COMMANDS: Record<
+  string,
+  (client: LanguageClient, editor: TextEditor) => Promise<void>
+> = {
+  "java.jumpToDefinition": lsp.goToDefinition,
+  "java.jumpToTypeDefinition": lsp.goToTypeDefinition,
+  "java.jumpToImplementation": lsp.goToImplementation,
+  "java.findReferences": (client, editor) =>
+    lsp.findReferences(client, editor, referencesView!),
+  "java.formatFile": formatDocument,
+  "java.formatSelection": lsp.formatSelection,
+  "java.organizeImports": lsp.organizeImports,
+  "java.renameSymbol": lsp.rename,
+  "java.codeActions": lsp.codeActions,
+};
+
+const SIMPLE_COMMANDS: Record<string, () => unknown> = {
+  "java.openLocation": () => referencesView?.openSelected(),
+  "java.openSymbol": () => symbolsView?.openSelected(),
+  "java.restartServer": () => server?.restart(),
+  "java.preferences": () => nova.workspace.openConfig(),
+  "java.extensionPreferences": () => nova.openConfig(),
+};
 
 function registerCommands(): void {
   const reg = (name: string, cb: (...args: never[]) => unknown) =>
     disposables.add(nova.commands.register(name, wrapCommand(cb as never)));
 
-  reg("java.jumpToDefinition", editorCommand(lsp.goToDefinition));
-  reg("java.jumpToTypeDefinition", editorCommand(lsp.goToTypeDefinition));
-  reg("java.jumpToImplementation", editorCommand(lsp.goToImplementation));
-
-  reg(
-    "java.findReferences",
-    editorCommand((client, editor) =>
-      lsp.findReferences(client, editor, referencesView!),
-    ),
-  );
-  reg("java.openLocation", () => referencesView?.openSelected());
+  for (const [name, run] of Object.entries(EDITOR_COMMANDS)) {
+    reg(name, async (editor: TextEditor) => {
+      const client = requireClient();
+      if (client) await run(client, editor);
+    });
+  }
+  for (const [name, run] of Object.entries(SIMPLE_COMMANDS)) reg(name, run);
 
   reg("java.findSymbols", async () => {
     const client = requireClient();
-    if (!client) return;
-    await lsp.findWorkspaceSymbol(client);
+    if (client) await lsp.findWorkspaceSymbol(client);
   });
-  reg("java.openSymbol", () => symbolsView?.openSelected());
-
-  reg("java.formatFile", editorCommand(formatDocument));
-  reg("java.formatSelection", editorCommand(lsp.formatSelection));
-  reg("java.organizeImports", editorCommand(lsp.organizeImports));
-  reg("java.renameSymbol", editorCommand(lsp.rename));
-  reg("java.codeActions", editorCommand(lsp.codeActions));
-
-  reg("java.restartServer", () => server?.restart());
-  reg("java.preferences", () => nova.workspace.openConfig());
-  reg("java.extensionPreferences", () => nova.openConfig());
 }
 
-// ---------------------------------------------------------------------------
-// Per-editor hooks: the Symbols sidebar follows the active editor, and saves
-// can format / organize imports.
-// ---------------------------------------------------------------------------
-
-/**
- * Wire up everything that has to happen per open editor.
- *
- * The Symbols section keeps in step with what is on screen. Nova has no
- * "active editor changed" event, so selection changes stand in for it:
- * whichever editor the user is working in is the one reporting them. Those
- * refreshes are cheap — the view skips the request when the file it already
- * describes is still the active one — while edits and saves force a reload.
- */
+// Nova has no "active editor changed" event, so selection changes stand in for
+// it: the editor being worked in is the one reporting them.
 function registerEditorHooks(): void {
   const symbols = symbolsView!;
-  disposables.add(symbols.treeView.onDidChangeVisibility(() => symbols.refresh()));
+  disposables.add(
+    symbols.treeView.onDidChangeVisibility(() => symbols.refresh()),
+  );
 
   disposables.add(
     nova.workspace.onDidAddTextEditor((editor) => {
       warnAboutSyntax(editor.document);
       symbols.refresh();
 
-      // Scoped to this editor so its listeners go away when it closes, rather
-      // than accumulating for the lifetime of the extension.
       const perEditor = new CompositeDisposable();
       perEditor.add(editor.onDidChangeSelection(() => symbols.refresh()));
       perEditor.add(editor.onDidStopChanging(() => symbols.refresh(true)));
@@ -157,13 +136,8 @@ function registerEditorHooks(): void {
   );
 }
 
-/**
- * Nova routes hover and completion to a language client only for the syntaxes
- * named in its `clientOptions.syntaxes` — here, exactly `"java"`. A `.java`
- * file reported as anything else means the editor never sends the request at
- * all, which from the outside is indistinguishable from a server that answered
- * nothing. Worth saying so out loud.
- */
+// Nova sends hover and completion only for a client's declared syntaxes, so a
+// .java file typed as anything else looks like a server answering nothing.
 function warnAboutSyntax(doc: TextDocument): void {
   if (!doc.path?.endsWith(".java") || doc.syntax === "java") return;
   console.error(
@@ -173,17 +147,13 @@ function warnAboutSyntax(doc: TextDocument): void {
   );
 }
 
-/**
- * Format and organize imports on save, if enabled.
- *
- * A failure here must never abort the save: Nova waits on the promise we
- * return, and a rejection surfaces as "the file couldn't be saved". Formatting
- * is best-effort, so errors are swallowed and logged.
- */
+// Errors are swallowed: Nova waits on this promise and surfaces a rejection as
+// "the file couldn't be saved".
 async function runSaveActions(editor: TextEditor): Promise<void> {
   if (editor.document.syntax !== "java") return;
   const client = server?.languageClient;
   if (!client) return;
+
   try {
     let organized = false;
     if (getOverridableBoolean(config.organizeImportsOnSave)) {
@@ -191,10 +161,8 @@ async function runSaveActions(editor: TextEditor): Promise<void> {
       organized = true;
     }
     if (getOverridableBoolean(config.formatOnSave)) {
-      // Give Nova a moment to push the organize-imports change to the server.
-      // Formatting is computed server-side against the document it last saw,
-      // so asking too soon returns edits whose positions describe the
-      // pre-organize text.
+      // Formatting is computed against the document the server last saw, so
+      // asking before the organize-imports edit lands returns stale positions.
       if (organized) await delay(150);
       await formatDocument(client, editor);
     }
@@ -203,19 +171,8 @@ async function runSaveActions(editor: TextEditor): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Restart the server when settings that change how it launches are edited.
-// ---------------------------------------------------------------------------
-
-/**
- * Watch a setting and react only when its effective value actually changed.
- *
- * A key has to be observed both globally and per-workspace, and a single edit
- * fires on both — so an unguarded listener runs its callback twice. That is
- * cheap for most things and ruinous for a restart: each one costs JDT.LS a
- * full project re-import, during which the server answers nothing. Comparing
- * against the last value collapses the duplicates.
- */
+// A key must be watched globally and per-workspace, and one edit fires both —
+// so compare values to collapse the duplicate into a single restart.
 function watchConfig(key: string, onChange: () => void): void {
   let previous = JSON.stringify(getConfig(key) ?? null);
   const handler = () => {
@@ -230,39 +187,26 @@ function watchConfig(key: string, onChange: () => void): void {
   }
 }
 
+const RELAUNCH_KEYS = [
+  config.lspFlavor,
+  config.lspPath,
+  config.jdkHome,
+  config.projectRoot,
+  config.logServerTrace,
+];
+
+const HOT_RELOAD_KEYS = [
+  config.lintEnabled,
+  config.inlayParameterNames,
+  config.formatStyle,
+  config.formatSettingsUrl,
+  config.sourcePaths,
+  config.outputPath,
+  config.referencedLibraries,
+];
+
 function registerConfigReload(): void {
-  // Changing these changes how the process is launched, so the server has to
-  // come back up. Everything else is pushed to the running server instead.
-  const relaunchKeys = [
-    config.lspFlavor,
-    config.lspPath,
-    config.jdkHome,
-    config.projectRoot,
-    config.logServerTrace,
-  ];
-
-  // These are plain settings: JDT.LS applies them from a
-  // workspace/didChangeConfiguration notification, no restart required.
-  const liveKeys = [
-    config.lintEnabled,
-    config.inlayParameterNames,
-    config.formatStyle,
-    config.formatSettingsUrl,
-    config.sourcePaths,
-    config.outputPath,
-    config.referencedLibraries,
-  ];
-
-  let pending: ReturnType<typeof setTimeout> | undefined;
-  const scheduleRestart = () => {
-    if (pending != null) clearTimeout(pending);
-    // Debounce so editing several settings in a row restarts only once.
-    pending = setTimeout(() => {
-      pending = undefined;
-      void server?.restart();
-    }, 500);
-  };
-
-  for (const key of relaunchKeys) watchConfig(key, scheduleRestart);
-  for (const key of liveKeys) watchConfig(key, () => server?.applySettings());
+  const scheduleRestart = debounce(500, () => void server?.restart());
+  for (const key of RELAUNCH_KEYS) watchConfig(key, scheduleRestart);
+  for (const key of HOT_RELOAD_KEYS) watchConfig(key, () => server?.applySettings());
 }

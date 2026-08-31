@@ -1,17 +1,6 @@
-/**
- * An in-memory stand-in for the Nova editor API.
- *
- * Faithful enough to run the extension's real code paths — activate(), the
- * commands, the language client lifecycle and the sidebar views — without an
- * editor. Shapes follow https://docs.nova.app/api-reference.
- *
- * `installNova()` installs the globals and returns a handle for driving the
- * fake: opening editors, answering LSP requests, inspecting notifications.
- */
-
-// ---------------------------------------------------------------------------
-// Primitives
-// ---------------------------------------------------------------------------
+// An in-memory stand-in for the Nova editor API, faithful enough to run the
+// extension's real code paths without an editor.
+// Shapes follow https://docs.nova.app/api-reference.
 
 class FakeRange {
   constructor(
@@ -50,7 +39,6 @@ class FakeCompositeDisposable {
   }
 }
 
-/** A minimal event source with the Disposable-returning shape Nova uses. */
 class Emitter<A extends unknown[]> {
   private readonly listeners = new Set<(...args: A) => void>();
 
@@ -67,10 +55,6 @@ class Emitter<A extends unknown[]> {
     return this.listeners.size;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Paths
-// ---------------------------------------------------------------------------
 
 const HOME = "/Users/tester";
 
@@ -115,26 +99,18 @@ const fakePath = {
   isAbsolute: (p: string) => p.startsWith("/"),
 };
 
-// ---------------------------------------------------------------------------
-// Filesystem
-// ---------------------------------------------------------------------------
-
-/** Mode bits, matching `nova.fs.constants`. */
 const F_OK = 0;
 const X_OK = 1;
 const W_OK = 2;
 const R_OK = 4;
 
 class FakeFileSystem {
-  /** path → contents. Directories are entries with a null value. */
   private readonly entries = new Map<string, string | null>();
   private readonly executable = new Set<string>();
 
   constructor() {
     this.mkdirp("/");
   }
-
-  // --- test-facing helpers -------------------------------------------------
 
   mkdirp(path: string): void {
     let current = "";
@@ -153,8 +129,6 @@ class FakeFileSystem {
   readFile(path: string): string | null {
     return this.entries.get(normalize(path)) ?? null;
   }
-
-  // --- the Nova API --------------------------------------------------------
 
   readonly constants = { F_OK, X_OK, W_OK, R_OK };
   readonly F_OK = F_OK;
@@ -238,10 +212,6 @@ class FakeFile {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
 class FakeConfiguration {
   private readonly values = new Map<string, unknown>();
   private readonly emitters = new Map<string, Emitter<[unknown]>>();
@@ -269,10 +239,6 @@ class FakeConfiguration {
     return emitter.on(fn);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Documents and editors
-// ---------------------------------------------------------------------------
 
 export class FakeTextDocument {
   isDirty = false;
@@ -313,7 +279,6 @@ export class FakeTextEditor {
   softTabs = true;
   scrolledTo: number | null = null;
 
-  /** Every replace performed, in the order the editor received them. */
   readonly replacements: { start: number; end: number; newText: string }[] = [];
 
   readonly onDidChangeSelectionEmitter = new Emitter<[FakeTextEditor]>();
@@ -322,7 +287,6 @@ export class FakeTextEditor {
   readonly onDidSaveEmitter = new Emitter<[FakeTextEditor]>();
   readonly onDidDestroyEmitter = new Emitter<[FakeTextEditor]>();
 
-  /** Promises returned by onWillSave handlers, so tests can await a save. */
   private willSavePromises: Promise<unknown>[] = [];
 
   constructor(document: FakeTextDocument) {
@@ -361,7 +325,6 @@ export class FakeTextEditor {
     this.scrolledTo = position;
   }
 
-  /** Run the onWillSave handlers, then the onDidSave ones, as Nova does. */
   async save(): Promise<void> {
     this.willSavePromises = [];
     this.onWillSaveEmitter.emit(this);
@@ -389,10 +352,6 @@ export class FakeTextEditor {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Workspace
-// ---------------------------------------------------------------------------
-
 class FakeWorkspace {
   readonly config = new FakeConfiguration();
   readonly textEditors: FakeTextEditor[] = [];
@@ -401,15 +360,12 @@ class FakeWorkspace {
 
   private readonly addEditorEmitter = new Emitter<[FakeTextEditor]>();
 
-  /** Test hooks: how the fake answers the interactive panels. */
   inputResponses: (string | null)[] = [];
-  /** Given the choices, return the index to pick (or null to cancel). */
   choose: (choices: string[], placeholder?: string) => number | null = () => null;
 
   readonly prompts: { message: string; choices?: string[] }[] = [];
   openedConfigs = 0;
 
-  /** The most recent panel or palette shown. */
   get lastPrompt(): { message: string; choices?: string[] } {
     const prompt = this.prompts[this.prompts.length - 1];
     if (!prompt) throw new Error("Nothing has been prompted for");
@@ -475,10 +431,6 @@ class FakeWorkspace {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Tree views
-// ---------------------------------------------------------------------------
-
 const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 } as const;
 
 class FakeTreeItem {
@@ -542,9 +494,6 @@ class FakeTreeView<E> {
     return this.selectionEmitter.on(fn);
   }
 
-  // --- test-facing helpers -------------------------------------------------
-
-  /** Select `element` and fire the selection event, as a click would. */
   select(element: E): void {
     this.selection = [element];
     this.selectionEmitter.emit(this.selection);
@@ -555,7 +504,6 @@ class FakeTreeView<E> {
     this.visibilityEmitter.emit();
   }
 
-  /** The rendered tree, as rows of `{name, descriptiveText, children}`. */
   async rows(element: E | null = null): Promise<RenderedRow[]> {
     const children = await this.provider.getChildren(element);
     const out: RenderedRow[] = [];
@@ -581,20 +529,12 @@ export interface RenderedRow {
   children: RenderedRow[];
 }
 
-// ---------------------------------------------------------------------------
-// Notifications
-// ---------------------------------------------------------------------------
-
 class FakeNotificationRequest {
   title?: string;
   body?: string;
   actions?: string[];
   constructor(public identifier: string) {}
 }
-
-// ---------------------------------------------------------------------------
-// Processes
-// ---------------------------------------------------------------------------
 
 export interface ProcessResult {
   stdout?: string[];
@@ -646,10 +586,6 @@ class FakeProcess {
   terminate(): void {}
 }
 
-// ---------------------------------------------------------------------------
-// Language client
-// ---------------------------------------------------------------------------
-
 export type RequestResponder = (method: string, params: unknown) => unknown;
 
 class FakeLanguageClient {
@@ -661,7 +597,6 @@ class FakeLanguageClient {
   private readonly requestHandlers = new Map<string, (params: unknown) => unknown>();
   private readonly stopEmitter = new Emitter<[Error | undefined]>();
 
-  /** Test hook: how this client answers `sendRequest`. */
   respond: RequestResponder = () => null;
 
   constructor(
@@ -702,34 +637,24 @@ class FakeLanguageClient {
     return this.respond(method, params);
   }
 
-  // --- test-facing helpers (server → client traffic) -----------------------
-
-  /** Deliver a server notification, e.g. `language/status`. */
   notify(method: string, params: unknown): void {
     this.notificationHandlers.get(method)?.(params);
   }
 
-  /** Deliver a server request, e.g. `workspace/configuration`. */
   request(method: string, params: unknown): unknown {
     return this.requestHandlers.get(method)?.(params);
   }
 
-  /** Simulate the server process exiting. */
   emitStop(err?: Error): void {
     this.running = false;
     this.stopEmitter.emit(err);
   }
 
-  /** Drive the client through to "ready" the way JDT.LS does. */
   becomeReady(): void {
     this.notify("language/status", { type: "Starting", message: "10%" });
     this.notify("language/status", { type: "ServiceReady", message: "Ready" });
   }
 }
-
-// ---------------------------------------------------------------------------
-// Assembly
-// ---------------------------------------------------------------------------
 
 let fs: FakeFileSystem;
 let clients: FakeLanguageClient[];
@@ -752,31 +677,18 @@ export interface NovaFake {
   notifications: {
     add(request: FakeNotificationRequest): Promise<void>;
     posted: FakeNotificationRequest[];
-    /** The banner most recently shown. */
     last(): FakeNotificationRequest;
-    /** Every banner's title, oldest first. */
     titles(): string[];
   };
 
-  // --- test-facing ---------------------------------------------------------
-  /** Every LanguageClient constructed, oldest first. */
   clients: FakeLanguageClient[];
-  /** The most recently constructed client. */
   client(): FakeLanguageClient;
-  /** Every process started, oldest first. */
   processes: ProcessInvocation[];
-  /** Decide what a started process does. */
   onProcess(fn: (invocation: ProcessInvocation) => ProcessResult): void;
-  /** A registered TreeView by its sidebar section id. */
   view<E>(identifier: string): FakeTreeView<E>;
-  /** Open a Java file in the workspace and return its editor. */
   openEditor(path: string, text: string, syntax?: string | null): FakeTextEditor;
 }
 
-/**
- * Install the Nova globals and return a handle for driving them. Call from
- * `beforeEach`; every call starts from a clean slate.
- */
 export function installNova(
   options: { workspacePath?: string } = {},
 ): NovaFake {
@@ -868,11 +780,8 @@ export function installNova(
   return nova;
 }
 
-/**
- * A standalone language client for testing a single request/response, keyed by
- * LSP method. Requesting a method with no entry throws, so a test that changes
- * which requests a command makes fails loudly rather than silently.
- */
+// Requesting a method with no entry throws, so a test that changes which
+// requests a command makes fails loudly rather than silently.
 export function fakeClient(
   responses: Record<string, unknown | ((params: unknown) => unknown)>,
 ): FakeLanguageClient {
@@ -885,7 +794,6 @@ export function fakeClient(
   return client;
 }
 
-/** Let queued microtasks and zero-delay timers run. */
 export function flush(ms = 0): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -1,26 +1,16 @@
-/**
- * Sidebar tree listing the symbols of the active Java file.
- *
- * This mirrors Nova's built-in Symbols sidebar: it follows the active editor
- * and shows that file's structure, rather than waiting to be filled in by a
- * command. The symbols come from the language server (`textDocument/
- * documentSymbol`), which knows about types the tree-sitter query does not.
- */
 import { LspRange } from "../lspNovaConversions";
+import { debounce } from "../novaUtils";
 import { revealLocation } from "../reveal";
 
-/** One row in the tree: an LSP symbol, flattened into what the view needs. */
 export interface SymbolNode {
   name: string;
   detail: string;
   kind: number;
   uri: string;
-  /** The range to select when the row is opened (the symbol's own name). */
   range: LspRange;
   children: SymbolNode[];
 }
 
-/** The hierarchical shape of a `textDocument/documentSymbol` response. */
 interface DocumentSymbol {
   name: string;
   detail?: string;
@@ -30,7 +20,6 @@ interface DocumentSymbol {
   children?: DocumentSymbol[];
 }
 
-/** The flat shape servers may return instead. */
 interface SymbolInformation {
   name: string;
   kind: number;
@@ -38,7 +27,6 @@ interface SymbolInformation {
   containerName?: string;
 }
 
-// LSP SymbolKind → a Nova system symbol image name.
 const SYMBOL_IMAGES: Record<number, string> = {
   2: "__symbol.package",
   3: "__symbol.package",
@@ -60,9 +48,7 @@ export class SymbolsView implements TreeDataProvider<SymbolNode> {
   private readonly tree: TreeView<SymbolNode>;
   private roots: SymbolNode[] = [];
   private readonly parents = new Map<SymbolNode, SymbolNode | null>();
-  private pending: ReturnType<typeof setTimeout> | undefined;
   private pendingForce = false;
-  /** URI of the document the tree currently describes, if any. */
   private loadedUri: string | null = null;
   /** Guards against a slow reply overwriting the results of a later one. */
   private generation = 0;
@@ -75,23 +61,16 @@ export class SymbolsView implements TreeDataProvider<SymbolNode> {
     return this.tree;
   }
 
-  /**
-   * Reload from the active editor, coalescing bursts of events into one request.
-   *
-   * Unforced refreshes are how the view follows the active editor, and they
-   * fire on every cursor move — so they do nothing when the file on screen is
-   * already the one in the tree. Edits and saves pass `force`.
-   */
   refresh(force = false): void {
-    this.pendingForce = this.pendingForce || force;
-    if (this.pending != null) clearTimeout(this.pending);
-    this.pending = setTimeout(() => {
-      this.pending = undefined;
-      const forced = this.pendingForce;
-      this.pendingForce = false;
-      void this.load(forced);
-    }, 200);
+    this.pendingForce ||= force;
+    this.reload();
   }
+
+  private readonly reload = debounce(200, () => {
+    const forced = this.pendingForce;
+    this.pendingForce = false;
+    void this.load(forced);
+  });
 
   async openSelected(): Promise<void> {
     const [selected] = this.tree.selection;
@@ -117,8 +96,7 @@ export class SymbolsView implements TreeDataProvider<SymbolNode> {
         textDocument: { uri: doc.uri },
       });
     } catch (err) {
-      // The server refuses requests while it is still importing; an empty
-      // list is the honest answer, and the next refresh will fill it in.
+      // The server refuses requests while importing; the next refresh retries.
       console.warn("textDocument/documentSymbol failed:", String(err));
       result = null;
     }
@@ -156,7 +134,9 @@ export class SymbolsView implements TreeDataProvider<SymbolNode> {
         : TreeItemCollapsibleState.None,
     );
     item.descriptiveText = element.detail;
-    item.tooltip = element.detail ? `${element.name} ${element.detail}` : element.name;
+    item.tooltip = element.detail
+      ? `${element.name} ${element.detail}`
+      : element.name;
     item.command = "java.openSymbol";
     const image = SYMBOL_IMAGES[element.kind];
     if (image) item.image = image;
@@ -164,15 +144,10 @@ export class SymbolsView implements TreeDataProvider<SymbolNode> {
   }
 }
 
-/**
- * Normalise either documentSymbol response shape into a tree.
- *
- * Which one arrives depends on the capabilities Nova advertises, so both have
- * to be handled: hierarchical `DocumentSymbol`s nest, flat `SymbolInformation`
- * ones are listed in the order the server sent them.
- */
+/** Which of the two response shapes arrives depends on Nova's capabilities. */
 function toNodes(result: unknown, uri: string): SymbolNode[] {
   if (!Array.isArray(result) || result.length === 0) return [];
+
   if ("location" in (result[0] as object)) {
     return (result as SymbolInformation[]).map((symbol) => ({
       name: symbol.name,
@@ -183,6 +158,7 @@ function toNodes(result: unknown, uri: string): SymbolNode[] {
       children: [],
     }));
   }
+
   const convert = (symbol: DocumentSymbol): SymbolNode => ({
     name: symbol.name,
     detail: symbol.detail ?? "",

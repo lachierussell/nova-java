@@ -1,7 +1,3 @@
-/**
- * Document formatting: either the Eclipse JDT language server or Gradle
- * Spotless, depending on the `java.format.formatter` setting.
- */
 import { config, getConfig } from "./config";
 import { findGradleWrapper, findProjectRoot } from "./paths";
 import { formatDocumentLsp } from "./commands/lspRequests";
@@ -11,8 +7,7 @@ export async function formatDocument(
   client: LanguageClient,
   editor: TextEditor,
 ): Promise<void> {
-  const formatter = getConfig<string>(config.formatter) ?? "lsp";
-  if (formatter === "spotless") {
+  if (getConfig<string>(config.formatter) === "spotless") {
     await formatWithSpotless(editor);
   } else {
     await formatDocumentLsp(client, editor);
@@ -33,41 +28,32 @@ function formatWithSpotless(editor: TextEditor): Promise<void> {
     );
     return Promise.reject(new Error("gradlew not found"));
   }
-  // The wrapper must run from the directory that owns it; `-p` then points
-  // Gradle at the module being formatted, which may be a subfolder.
-  const gradleRoot = nova.path.dirname(gradlew);
-  const projectRoot = findProjectRoot();
 
   const documentPath = editor.document.path;
-  if (!documentPath) {
-    // Unsaved buffer with no on-disk path — Spotless works against files on
-    // disk, so there is nothing for it to format. Bail out cleanly instead of
-    // logging a nonsensical "../../.." relative path and running Gradle anyway.
-    return Promise.resolve();
-  }
+  if (!documentPath) return Promise.resolve();
 
-  const relative = nova.path.relative(gradleRoot, documentPath);
-  console.log(`Formatting ${relative} with Spotless…`);
+  // The wrapper must run from the directory owning it; `-p` then points Gradle
+  // at the module, which may be a subfolder.
+  const gradleRoot = nova.path.dirname(gradlew);
+  const projectRoot = findProjectRoot();
+  console.log(
+    `Formatting ${nova.path.relative(gradleRoot, documentPath)} with Spotless…`,
+  );
 
   const args = ["bash", gradlew];
   if (projectRoot !== gradleRoot) args.push("-p", projectRoot);
-  // Without --offline, a machine with no network stalls for minutes trying to
-  // reach the plugin portal, and a format-on-save appears to hang.
+  // Offline, a network-less machine stalls for minutes on the plugin portal.
   if (getConfig<boolean>(config.spotlessOffline) === true) args.push("--offline");
   args.push("spotlessApply");
 
   return new Promise<void>((resolve, reject) => {
-    const process = new Process("/usr/bin/env", {
-      args,
-      cwd: gradleRoot,
-    });
+    const process = new Process("/usr/bin/env", { args, cwd: gradleRoot });
     let errorOutput = "";
     process.onStderr((line) => {
       errorOutput += line;
     });
     process.onDidExit((status) => {
       if (status === 0) {
-        // Gradle rewrote the file on disk; Nova reloads it automatically.
         resolve();
       } else {
         notify.error("Spotless failed", errorOutput.trim().split("\n").pop());

@@ -1,30 +1,17 @@
 /**
- * Killing JDT.LS processes that outlived their client.
- *
- * `client.stop()` asks the server to shut down over LSP, which a healthy
- * server honours and a wedged or mid-import one ignores — and Nova does not
- * escalate. The JVM then outlives its client, keeps the Eclipse workspace lock
- * on its `-data` directory, and every subsequent launch comes up unable to
- * take it. Since the launcher chain is all `exec`, the JVM is a single process
- * we can signal directly.
+ * `client.stop()` asks the server to shut down over LSP, which a wedged or
+ * mid-import JDT.LS ignores — and Nova does not escalate. The JVM then keeps
+ * the Eclipse workspace lock on its `-data` directory and every later launch
+ * comes up unable to take it. The launcher chain is all `exec`, so the JVM is
+ * a single process we can signal directly.
  */
 
 import { delay } from "./novaUtils";
 
-/** The marker every JDT.LS JVM carries, whatever launcher started it. */
 const JDTLS_MARKER = "org.eclipse.jdt.ls.core.id1";
-
-/** How long to let a SIGTERMed JVM exit before insisting. */
 const TERM_GRACE_MS = 3000;
 const POLL_MS = 250;
 
-/**
- * Kill any JDT.LS still running against `dataDir`.
- *
- * Only processes matching *both* the JDT.LS marker and this exact data
- * directory are touched, so another project's server — or an unrelated JVM —
- * is never a candidate.
- */
 export async function reapOrphanedServers(dataDir: string): Promise<void> {
   let pids = await findServerPids(dataDir);
   if (pids.length === 0) return;
@@ -53,10 +40,9 @@ export async function reapOrphanedServers(dataDir: string): Promise<void> {
   }
 }
 
-/** PIDs of JDT.LS processes using `dataDir`. */
+// Matching marker *and* data directory keeps another project's server from
+// ever being a candidate. Matched in JS so no shell reads the path as a pattern.
 async function findServerPids(dataDir: string): Promise<string[]> {
-  // One `ps` and match in JS: no shell, so nothing in the path can be
-  // interpreted as a pattern or an argument.
   const output = await runCommand("/bin/ps", ["-Ao", "pid=,command="]);
   const pids: string[] = [];
   for (const line of output.split("\n")) {
@@ -72,12 +58,10 @@ async function signal(name: "TERM" | "KILL", pids: string[]): Promise<void> {
   try {
     await runCommand("/bin/kill", [`-${name}`, ...pids]);
   } catch (err) {
-    // A process that exited between listing and signalling is the common case.
     console.log(`kill -${name} ${pids.join(" ")}: ${String(err)}`);
   }
 }
 
-/** Run a command to completion and return its stdout. */
 function runCommand(path: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     let out = "";

@@ -3,7 +3,7 @@
   "name": "Java",
   "organization": "Parkcedar",
   "description": "Complete Java development support with Eclipse JDT.LS, tree-sitter syntax highlighting, intelligent code completion, navigation, refactoring, and real-time diagnostics.",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "categories": [
     "commands",
     "languages",

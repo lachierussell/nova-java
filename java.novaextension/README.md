@@ -6,23 +6,7 @@ expect from a Java IDE — without leaving Nova.
 
 Works with Maven, Gradle and plain Eclipse projects.
 
-## The Java sidebar
-
-![The Java sidebar in Nova, showing the Language Server, References and Symbols sections](https://raw.githubusercontent.com/lachierussell/nova-java/main/Images/sidebar.png)
-
-Three sections, all in one place:
-
-**Language Server** — is it running, and what is it running with? The status dot
-turns green once the server has finished importing your project (which can take
-a minute on a big one), and the rows below show the JDK, server and project root
-it actually resolved. When something isn't working, this is the first place to
-look. The refresh button restarts the server.
-
-**References** — results from *Find References*. Click a row to jump to it.
-
-**Symbols** — the structure of the file you're editing: classes, methods and
-fields, nested the way they are in the code. It follows whichever file is in
-front of you and updates as you type.
+![Java code in Nova with JDT.LS hover documentation for java.lang.String](https://raw.githubusercontent.com/lachierussell/nova-java/main/Images/hero.png)
 
 ## What you get
 
@@ -48,6 +32,24 @@ front of you and updates as you type.
 **Reading code**
 - Fast tree-sitter syntax highlighting
 - Code folding for classes, methods, blocks and comments
+
+## The Java sidebar
+
+![The Java sidebar in Nova, showing the Language Server, References and Symbols sections](https://raw.githubusercontent.com/lachierussell/nova-java/main/Images/sidebar.png)
+
+Three sections, all in one place:
+
+**Language Server** — is it running, and what is it running with? The status dot
+turns green once the server has finished importing your project (which can take
+a minute on a big one), and the rows below show the JDK, server and project root
+it actually resolved. When something isn't working, this is the first place to
+look. The refresh button restarts the server.
+
+**References** — results from *Find References*. Click a row to jump to it.
+
+**Symbols** — the structure of the file you're editing: classes, methods and
+fields, nested the way they are in the code. It follows whichever file is in
+front of you and updates as you type.
 
 ## Before you start
 
