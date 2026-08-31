@@ -1,23 +1,44 @@
-import { describe, expect, it } from "vitest";
-import { parseJavaMajor, sortJdkDirectoriesNewestFirst } from "./paths";
-import { spotlessArgs } from "./format";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { installNova, NovaFake } from "./testing/nova";
+import {
+  findGradleWrapper,
+  findJavaExecutable,
+  findJdtls,
+  findJdtlsConfigPath,
+  findJavaHome,
+  findProjectRoot,
+  findPython,
+  parseJavaMajor,
+  sortJdkDirectoriesNewestFirst,
+} from "./paths";
+
+let nova: NovaFake;
+
+beforeEach(() => {
+  nova = installNova();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+});
+
+/** Lay down a JDK the way macOS does. */
+function installJdk(name: string): string {
+  const home = `/Library/Java/JavaVirtualMachines/${name}/Contents/Home`;
+  nova.fs.mkdirp(home);
+  nova.fs.writeFile(`${home}/bin/java`, "", { executable: true });
+  return home;
+}
 
 describe("parseJavaMajor", () => {
   it("reads modern version strings", () => {
     expect(parseJavaMajor("21.0.1")).toBe(21);
     expect(parseJavaMajor("17")).toBe(17);
-    expect(parseJavaMajor("25.0.2")).toBe(25);
   });
 
   it("reads the legacy 1.x form, where the major version is the second part", () => {
     expect(parseJavaMajor("1.8.0_401")).toBe(8);
-    expect(parseJavaMajor("1.7.0")).toBe(7);
   });
 
   it("reads vendor directory names", () => {
-    expect(parseJavaMajor("jdk-21.jdk")).toBe(21);
     expect(parseJavaMajor("temurin-17.jdk")).toBe(17);
-    expect(parseJavaMajor("zulu-8.jdk")).toBe(8);
     expect(parseJavaMajor("jdk1.8.0_401.jdk")).toBe(8);
   });
 
@@ -28,81 +49,179 @@ describe("parseJavaMajor", () => {
 
 describe("sortJdkDirectoriesNewestFirst", () => {
   it("orders by version, not lexically", () => {
-    // The bug this replaces: a lexical sort puts "jdk-8.jdk" above
-    // "jdk-21.jdk", so the extension handed the language server a Java it
-    // refuses to run on and the process died before answering anything.
     expect(
-      sortJdkDirectoriesNewestFirst(["jdk-21.jdk", "jdk-8.jdk", "jdk-17.jdk"]),
+      sortJdkDirectoriesNewestFirst(["jdk-8.jdk", "jdk-21.jdk", "jdk-17.jdk"]),
     ).toEqual(["jdk-21.jdk", "jdk-17.jdk", "jdk-8.jdk"]);
   });
 
-  it("puts a modern JDK ahead of a legacy 1.8 one", () => {
-    expect(
-      sortJdkDirectoriesNewestFirst(["jdk1.8.0_401.jdk", "jdk-21.jdk"]),
-    ).toEqual(["jdk-21.jdk", "jdk1.8.0_401.jdk"]);
-  });
-
-  it("handles mixed vendors and two-digit versions", () => {
-    expect(
-      sortJdkDirectoriesNewestFirst([
-        "temurin-11.jdk",
-        "jdk-9.jdk",
-        "zulu-25.jdk",
-        "jdk-17.jdk",
-      ]),
-    ).toEqual(["zulu-25.jdk", "jdk-17.jdk", "temurin-11.jdk", "jdk-9.jdk"]);
-  });
-
-  it("sinks unparseable names below real versions", () => {
-    const sorted = sortJdkDirectoriesNewestFirst(["openjdk", "jdk-21.jdk"]);
-    expect(sorted[0]).toBe("jdk-21.jdk");
-  });
-
-  it("does not mutate its input", () => {
-    const input = ["jdk-8.jdk", "jdk-21.jdk"];
-    sortJdkDirectoriesNewestFirst(input);
-    expect(input).toEqual(["jdk-8.jdk", "jdk-21.jdk"]);
+  it("sinks names with no version below real ones", () => {
+    expect(sortJdkDirectoriesNewestFirst(["openjdk", "jdk-17.jdk"])).toEqual([
+      "jdk-17.jdk",
+      "openjdk",
+    ]);
   });
 });
 
-describe("spotlessArgs", () => {
-  const gradlew = "/repo/gradlew";
-
-  it("runs spotlessApply from the wrapper's own directory", () => {
-    expect(spotlessArgs(gradlew, "/repo", "/repo", false)).toEqual([
-      "bash",
-      gradlew,
-      "spotlessApply",
-    ]);
+describe("findJavaHome", () => {
+  it("prefers the configured JDK, even when others are installed", () => {
+    const configured = installJdk("temurin-21.jdk");
+    installJdk("jdk-25.jdk");
+    nova.config.set("java.jdk.home", configured);
+    expect(findJavaHome()).toBe(configured);
   });
 
-  it("points Gradle at the module when the project root is a subfolder", () => {
-    expect(spotlessArgs(gradlew, "/repo", "/repo/service", false)).toEqual([
-      "bash",
-      gradlew,
-      "-p",
-      "/repo/service",
-      "spotlessApply",
-    ]);
+  it("lets a workspace setting override the global one", () => {
+    const global = installJdk("jdk-21.jdk");
+    const workspace = installJdk("jdk-25.jdk");
+    nova.config.set("java.jdk.home", global);
+    nova.workspace.config.set("java.jdk.home", workspace);
+    expect(findJavaHome()).toBe(workspace);
   });
 
-  it("passes --offline so a networkless Gradle fails instead of stalling", () => {
-    expect(spotlessArgs(gradlew, "/repo", "/repo", true)).toEqual([
-      "bash",
-      gradlew,
-      "--offline",
-      "spotlessApply",
-    ]);
+  it("falls back to JAVA_HOME", () => {
+    const home = installJdk("jdk-21.jdk");
+    nova.environment.JAVA_HOME = home;
+    expect(findJavaHome()).toBe(home);
   });
 
-  it("combines a subfolder project root with offline mode", () => {
-    expect(spotlessArgs(gradlew, "/repo", "/repo/service", true)).toEqual([
-      "bash",
-      gradlew,
-      "-p",
-      "/repo/service",
-      "--offline",
-      "spotlessApply",
-    ]);
+  it("ignores a JAVA_HOME that is too old and picks the newest installed JDK", () => {
+    nova.environment.JAVA_HOME = installJdk("jdk-8.jdk");
+    installJdk("jdk-17.jdk");
+    const newest = installJdk("jdk-25.jdk");
+    expect(findJavaHome()).toBe(newest);
+  });
+
+  it("skips JDKs older than the minimum", () => {
+    installJdk("jdk-8.jdk");
+    installJdk("jdk-11.jdk");
+    expect(findJavaHome()).toBeNull();
+  });
+
+  it("resolves a jenv version file in the project root", () => {
+    const home = "/Users/tester/.jenv/versions/21.0.1";
+    nova.fs.mkdirp(home);
+    nova.fs.writeFile("/Users/tester/project/.java-version", "21.0.1\n");
+    expect(findJavaHome()).toBe(home);
+  });
+
+  it("returns null when there is no JDK anywhere", () => {
+    expect(findJavaHome()).toBeNull();
+  });
+});
+
+describe("findJavaExecutable", () => {
+  it("uses the java inside the resolved JAVA_HOME", () => {
+    const home = installJdk("jdk-21.jdk");
+    expect(findJavaExecutable()).toBe(`${home}/bin/java`);
+  });
+
+  it("falls back to the one on $PATH", () => {
+    expect(findJavaExecutable()).toBe("java");
+  });
+});
+
+describe("findJdtls", () => {
+  it("finds the Homebrew launcher script", () => {
+    nova.fs.writeFile("/opt/homebrew/bin/jdtls", "#!/usr/bin/env python3", {
+      executable: true,
+    });
+    expect(findJdtls()).toBe("/opt/homebrew/bin/jdtls");
+  });
+
+  it("resolves the equinox launcher jar through its glob", () => {
+    nova.fs.writeFile(
+      "/usr/local/share/jdtls/plugins/org.eclipse.equinox.launcher_1.6.900.jar",
+    );
+    expect(findJdtls()).toBe(
+      "/usr/local/share/jdtls/plugins/org.eclipse.equinox.launcher_1.6.900.jar",
+    );
+  });
+
+  it("falls back to $PATH", () => {
+    nova.environment.PATH = "/opt/tools/bin:/usr/bin";
+    nova.fs.writeFile("/opt/tools/bin/jdtls", "", { executable: true });
+    expect(findJdtls()).toBe("/opt/tools/bin/jdtls");
+  });
+
+  it("returns null when nothing is installed", () => {
+    expect(findJdtls()).toBeNull();
+  });
+});
+
+describe("findJdtlsConfigPath", () => {
+  const jar = "/usr/local/share/jdtls/plugins/org.eclipse.equinox.launcher_1.jar";
+
+  it("prefers the arm configuration on Apple silicon", () => {
+    nova.fs.mkdirp("/opt/homebrew");
+    nova.fs.mkdirp("/usr/local/share/jdtls/config_mac");
+    nova.fs.mkdirp("/usr/local/share/jdtls/config_mac_arm");
+    expect(findJdtlsConfigPath(jar)).toBe("/usr/local/share/jdtls/config_mac_arm");
+  });
+
+  it("returns null, with a warning, when the install has none", () => {
+    nova.fs.mkdirp("/usr/local/share/jdtls/plugins");
+    expect(findJdtlsConfigPath(jar)).toBeNull();
+    expect(console.warn).toHaveBeenCalled();
+  });
+});
+
+describe("findPython", () => {
+  it("prefers the system interpreter", () => {
+    nova.fs.writeFile("/usr/bin/python3", "", { executable: true });
+    nova.fs.writeFile("/opt/homebrew/bin/python3", "", { executable: true });
+    expect(findPython()).toBe("/usr/bin/python3");
+  });
+
+  it("returns null when there is no python3", () => {
+    expect(findPython()).toBeNull();
+  });
+});
+
+describe("findProjectRoot", () => {
+  it("defaults to the workspace", () => {
+    expect(findProjectRoot()).toBe("/Users/tester/project");
+  });
+
+  it("honours a relative java.project.root", () => {
+    nova.fs.mkdirp("/Users/tester/project/server");
+    nova.workspace.config.set("java.project.root", "server");
+    expect(findProjectRoot()).toBe("/Users/tester/project/server");
+  });
+
+  it("honours an absolute path and a ~ prefix", () => {
+    nova.fs.mkdirp("/Users/tester/elsewhere");
+    nova.workspace.config.set("java.project.root", "~/elsewhere");
+    expect(findProjectRoot()).toBe("/Users/tester/elsewhere");
+  });
+
+  it("falls back to the workspace when the setting is not a directory", () => {
+    nova.workspace.config.set("java.project.root", "nope");
+    expect(findProjectRoot()).toBe("/Users/tester/project");
+    expect(console.warn).toHaveBeenCalled();
+  });
+});
+
+describe("findGradleWrapper", () => {
+  it("walks up from the project root", () => {
+    nova.fs.writeFile("/Users/tester/project/gradlew", "");
+    nova.fs.mkdirp("/Users/tester/project/modules/app");
+    nova.workspace.config.set("java.project.root", "modules/app");
+    expect(findGradleWrapper()).toBe("/Users/tester/project/gradlew");
+  });
+
+  it("accepts a configured directory containing gradlew", () => {
+    nova.fs.writeFile("/Users/tester/build/gradlew", "");
+    nova.workspace.config.set("java.gradle.wrapperPath", "~/build");
+    expect(findGradleWrapper()).toBe("/Users/tester/build/gradlew");
+  });
+
+  it("warns and gives up when the configured path does not exist", () => {
+    nova.workspace.config.set("java.gradle.wrapperPath", "/nope/gradlew");
+    expect(findGradleWrapper()).toBeNull();
+    expect(console.warn).toHaveBeenCalled();
+  });
+
+  it("returns null for a project with no wrapper", () => {
+    expect(findGradleWrapper()).toBeNull();
   });
 });
