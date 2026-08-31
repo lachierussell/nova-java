@@ -41,6 +41,16 @@ Run `npm run build` before submitting or activating the extension — the bundle
 
 ## Testing
 
-Open `test-workspace/` as a project in Nova with the extension activated
+```bash
+npm test          # integration tests (vitest)
+npm run test:watch
+```
+
+The tests run the extension against an in-memory stand-in for the Nova API
+(`src/testing/nova.ts`) — filesystem, workspace, editors, tree views, processes
+and the language client — so activation, the commands, the JDT.LS lifecycle and
+the sidebar views are exercised for real without an editor.
+
+For a manual check, open `test-workspace/` as a project in Nova with the extension activated
 (Extensions → *Activate Project as Extension* on `java.novaextension/`). See
 [`test-workspace/README.md`](./test-workspace/README.md) for what to try.
