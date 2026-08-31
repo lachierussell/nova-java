@@ -1026,8 +1026,10 @@ class ReferencesView {
   }
   show(locations) {
     this.locations = locations;
-    this.tree.reload();
-    this.tree.reveal(locations[0], { focus: false, reveal: 3 });
+    const first = locations[0];
+    void this.tree.reload().then(() => {
+      if (first) this.tree.reveal(first, { focus: false, reveal: 3 });
+    });
   }
   /** Reveal the currently selected reference (invoked on activation). */
   async openSelected() {
@@ -1036,6 +1038,10 @@ class ReferencesView {
   }
   getChildren(element) {
     return element ? [] : this.locations;
+  }
+  /** Required by Nova before reveal() may be used; the list is flat. */
+  getParent(_element) {
+    return null;
   }
   getTreeItem(element) {
     const path = decodeURIComponent(element.uri.replace(/^file:\/\//, ""));

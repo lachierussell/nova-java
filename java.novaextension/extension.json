@@ -386,6 +386,8 @@
     {
       "id": "java.sidebar",
       "name": "Java",
+      "smallImage": "java-sidebar-small",
+      "largeImage": "java-sidebar-large",
       "sections": [
         {
           "id": "java.sidebar.info",

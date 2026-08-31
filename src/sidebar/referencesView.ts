@@ -18,8 +18,10 @@ export class ReferencesView implements TreeDataProvider<LspLocation> {
 
   show(locations: LspLocation[]): void {
     this.locations = locations;
-    this.tree.reload();
-    this.tree.reveal(locations[0], { focus: false, reveal: 3 });
+    const first = locations[0];
+    void this.tree.reload().then(() => {
+      if (first) this.tree.reveal(first, { focus: false, reveal: 3 });
+    });
   }
 
   /** Reveal the currently selected reference (invoked on activation). */
@@ -30,6 +32,11 @@ export class ReferencesView implements TreeDataProvider<LspLocation> {
 
   getChildren(element: LspLocation | null): LspLocation[] {
     return element ? [] : this.locations;
+  }
+
+  /** Required by Nova before reveal() may be used; the list is flat. */
+  getParent(_element: LspLocation): LspLocation | null {
+    return null;
   }
 
   getTreeItem(element: LspLocation): TreeItem {
